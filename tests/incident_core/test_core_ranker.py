@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -9,12 +10,15 @@ import pytest
 
 from mlops_pipeline.contracts import CONTINUOUS_COLS, ColumnStats
 from mlops_pipeline.incident.ranker import (
+    _EVIDENCE_SIGNALS,
+    NO_MLR_EVIDENCE_SIGNALS,
     SIGNALS,
     NullModel,
     fit_null_model_from_stats,
     hypotheses_for,
     psi_baseline,
     rank,
+    rank_no_mlr,
     robust_z,
 )
 from mlops_pipeline.model.data import BILL_COLS, FEATURE_COLS, PAY_COLS
@@ -315,3 +319,120 @@ def test_null_model_json_round_trip(tmp_path) -> None:
     null.to_json(path)
     assert '"psi|AGE"' in path.read_text(encoding="utf-8")
     assert NullModel.from_json(path) == null
+
+
+def test_null_model_json_round_trips_window_size_hash_and_variant_tau(tmp_path) -> None:
+    keys = [(s, c) for s in SIGNALS for c in FEATURE_COLS]
+    null = NullModel(
+        {k: 0.0 for k in keys},
+        {k: 1.0 for k in keys},
+        7.25,
+        window_size=250,
+        reference_sha256="ab" * 32,
+        tau_no_mlr=4.5,
+    )
+    path = tmp_path / "null.json"
+    null.to_json(path)
+    loaded = NullModel.from_json(path)
+    assert loaded == null
+    assert (loaded.window_size, loaded.reference_sha256, loaded.tau_no_mlr) == (250, "ab" * 32, 4.5)
+
+
+def test_null_model_json_without_the_new_fields_gets_defaults(tmp_path) -> None:
+    path = tmp_path / "old.json"
+    path.write_text(
+        json.dumps({"medians": {"psi|AGE": 0.1}, "scales": {"psi|AGE": 0.5}, "tau": 3.0}),
+        encoding="utf-8",
+    )
+    loaded = NullModel.from_json(path)
+    assert loaded.window_size == 1000
+    assert loaded.reference_sha256 is None and loaded.tau_no_mlr is None
+
+
+def test_fit_records_the_window_size_it_was_fitted_at() -> None:
+    null = fit_null_model_from_stats([window()], [window()], window_size=200)
+    assert null.window_size == 200
+    assert fit_null_model_from_stats([window()], [window()]).window_size == 1000
+
+
+# ------------------------------------------------- exploratory variant (S1)
+
+
+def _mixed_window() -> dict[str, ColumnStats]:
+    return window(
+        AGE={"ks": 0.8, "psi": 2.0, "out_of_range": 0.4},
+        BILL_AMT1={"median_log_ratio": 3.0, "out_of_range": 0.2, "psi": 1.0},
+        BILL_AMT2={"median_log_ratio": 9.0},
+        PAY_1={"null_delta": 0.3, "psi": 5.0},
+        EDUCATION={"unseen_share": 0.5, "psi": 0.2},
+    )
+
+
+def test_default_ranking_is_unchanged_by_passing_the_default_mapping() -> None:
+    null = unit_null(tau=1.5)
+    w = _mixed_window()
+    assert rank(null, w) == rank(null, w, evidence_signals=_EVIDENCE_SIGNALS)
+    assert rank(null, w) == rank(null, w, evidence_signals=dict(_EVIDENCE_SIGNALS), tau=null.tau)
+
+
+def test_default_fit_is_unchanged_by_passing_the_default_mapping() -> None:
+    first = [window(AGE={"psi": v}) for v in (0.1, 0.2, 0.3)]
+    second = [
+        window(AGE={"ks": v, "psi": 2 * v}, BILL_AMT1={"median_log_ratio": v}) for v in (1, 2, 5)
+    ]
+    plain = fit_null_model_from_stats(first, second)
+    explicit = fit_null_model_from_stats(first, second, evidence_signals=_EVIDENCE_SIGNALS)
+    assert plain == explicit
+    assert plain.tau_no_mlr is None  # the variant is only fitted when asked for
+
+
+def test_variant_changes_only_unit_break_evidence() -> None:
+    assert NO_MLR_EVIDENCE_SIGNALS["unit_break"] == ("out_of_range",)
+    for cause in ("covariate_shift", "null_spike", "recode"):
+        assert NO_MLR_EVIDENCE_SIGNALS[cause] == _EVIDENCE_SIGNALS[cause]
+
+
+def test_variant_ignores_median_log_ratio_for_unit_break() -> None:
+    null = NullModel(**{**vars(unit_null()), "tau_no_mlr": 1.0})
+    w = window(BILL_AMT2={"median_log_ratio": 9.0})
+    frozen = {(h.cause, h.column): h.evidence for h in rank(null, w).hypotheses}
+    variant = {(h.cause, h.column): h.evidence for h in rank_no_mlr(null, w).hypotheses}
+    assert frozen[("unit_break", "BILL_AMT2")] == 9.0
+    assert variant[("unit_break", "BILL_AMT2")] == 0.0
+    # every other hypothesis is identical
+    assert {k: v for k, v in frozen.items() if k[0] != "unit_break"} == {
+        k: v for k, v in variant.items() if k[0] != "unit_break"
+    }
+    # and with an out_of_range signal the variant still sees the break
+    w = window(BILL_AMT2={"median_log_ratio": 9.0, "out_of_range": 4.0})
+    assert rank_no_mlr(null, w).top.cause == "unit_break"
+
+
+def test_variant_uses_its_own_tau_for_the_incident_verdict() -> None:
+    null = NullModel(**{**vars(unit_null(tau=5.0)), "tau_no_mlr": 2.0})
+    w = window(AGE={"ks": 3.0})
+    assert not rank(null, w).incident and rank_no_mlr(null, w).incident
+    assert rank_no_mlr(null, w).threshold == 2.0
+
+
+def test_rank_no_mlr_needs_a_fitted_variant_tau() -> None:
+    with pytest.raises(ValueError):
+        rank_no_mlr(unit_null(), window())
+
+
+def test_variant_tau_comes_from_the_second_set_and_the_variant_mapping() -> None:
+    first = [window() for _ in range(5)]  # medians 0, scale floor 0.01 everywhere
+    # z = value / 0.01: median_log_ratio 0.5 -> 50, out_of_range 0.02 -> 2
+    second = [window(BILL_AMT1={"median_log_ratio": 0.5, "out_of_range": 0.02}) for _ in range(10)]
+    null = fit_null_model_from_stats(first, second, variant_signals=NO_MLR_EVIDENCE_SIGNALS)
+    assert null.tau == pytest.approx(50.0)
+    assert null.tau_no_mlr == pytest.approx(2.0)
+
+    # the first set only moves the medians: with a median_log_ratio median of 0.5 that signal
+    # scores 0 on the second set, so the frozen tau falls to the out_of_range score as well
+    other_first = [window(BILL_AMT1={"median_log_ratio": 0.5}) for _ in range(5)]
+    shifted = fit_null_model_from_stats(
+        other_first, second, variant_signals=NO_MLR_EVIDENCE_SIGNALS
+    )
+    assert shifted.tau == pytest.approx(2.0)
+    assert shifted.tau_no_mlr == pytest.approx(2.0)

@@ -66,6 +66,14 @@ _EVIDENCE_SIGNALS: dict[FaultClass, tuple[str, ...]] = {
     "null_spike": ("null_delta",),
     "recode": ("psi", "unseen_share"),
 }
+#: Exploratory arm S1 (PREREGISTRATION.md, Amendment 2): the same evidence except that
+#: ``unit_break`` reads ``out_of_range`` only. ``median_log_ratio`` is noisy on columns whose
+#: median sits on a coarse grid, where its no-fault MAD collapses to the 0.01 floor. It never
+#: feeds H1 or H2.
+NO_MLR_EVIDENCE_SIGNALS: dict[FaultClass, tuple[str, ...]] = {
+    **_EVIDENCE_SIGNALS,
+    "unit_break": ("out_of_range",),
+}
 
 _COLUMN_POSITION = {c: i for i, c in enumerate(FEATURE_COLS)}
 #: Most specific explanation first (Amendment 1); covariate shift is the residual one.
@@ -80,17 +88,31 @@ assert set(_SPECIFICITY) == set(FAULT_CLASSES)
 
 @dataclass(frozen=True)
 class NullModel:
-    """What each signal looks like on no-fault windows, plus the incident threshold."""
+    """What each signal looks like on no-fault windows, plus the incident threshold.
+
+    The scores are calibrated for windows of ``window_size`` rows: PSI, KS and the share
+    signals all get noisier on a smaller window, so a smaller one reads as drift. Live callers
+    use it as the minimum window they will judge. ``reference_sha256`` ties a saved model to
+    the reference file it was fitted on. ``tau_no_mlr`` is the threshold of the exploratory
+    variant (``NO_MLR_EVIDENCE_SIGNALS``); the medians and scales are shared because both
+    variants read the same signals.
+    """
 
     medians: dict[tuple[str, str], float]  # (signal, column) -> median under no fault
     scales: dict[tuple[str, str], float]  # (signal, column) -> max(1.4826 * MAD, 0.01)
     tau: float
+    window_size: int = 1000
+    reference_sha256: str | None = None
+    tau_no_mlr: float | None = None
 
     def to_json(self, path: str | Path) -> None:
         payload = {
             "medians": {f"{s}|{c}": v for (s, c), v in self.medians.items()},
             "scales": {f"{s}|{c}": v for (s, c), v in self.scales.items()},
             "tau": self.tau,
+            "window_size": self.window_size,
+            "reference_sha256": self.reference_sha256,
+            "tau_no_mlr": self.tau_no_mlr,
         }
         Path(path).write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
 
@@ -109,6 +131,9 @@ class NullModel:
             medians=split_keys(payload["medians"]),
             scales=split_keys(payload["scales"]),
             tau=float(payload["tau"]),
+            window_size=int(payload.get("window_size", 1000)),
+            reference_sha256=payload.get("reference_sha256"),
+            tau_no_mlr=None if payload.get("tau_no_mlr") is None else float(payload["tau_no_mlr"]),
         )
 
 
@@ -150,12 +175,15 @@ def _diagnosis_key(h: Hypothesis, tau: float) -> tuple[int, float, int]:
 
 
 def _hypotheses(
-    z: Mapping[tuple[str, str], float], columns: Sequence[str], tau: float
+    z: Mapping[tuple[str, str], float],
+    columns: Sequence[str],
+    tau: float,
+    evidence_signals: Mapping[FaultClass, tuple[str, ...]] = _EVIDENCE_SIGNALS,
 ) -> tuple[Hypothesis, ...]:
     by_column: dict[str, list[Hypothesis]] = {}
     for column in columns:
         for cause in hypotheses_for(column):
-            used = {s: z[(s, column)] for s in _EVIDENCE_SIGNALS[cause]}
+            used = {s: z[(s, column)] for s in evidence_signals[cause]}
             by_column.setdefault(column, []).append(
                 Hypothesis(cause, column, max(used.values()), used)
             )
@@ -172,11 +200,31 @@ def _hypotheses(
     )
 
 
-def rank(null: NullModel, stats: Mapping[str, ColumnStats]) -> Ranking:
-    """Rank every applicable (fault class, column) pair; incident iff max evidence >= tau."""
-    hypotheses = _hypotheses(robust_z(null, stats), list(stats), null.tau)
-    incident = bool(hypotheses) and _max_evidence(hypotheses) >= null.tau
-    return Ranking("ranker", hypotheses, incident, null.tau)
+def rank(
+    null: NullModel,
+    stats: Mapping[str, ColumnStats],
+    *,
+    evidence_signals: Mapping[FaultClass, tuple[str, ...]] | None = None,
+    tau: float | None = None,
+) -> Ranking:
+    """Rank every applicable (fault class, column) pair; incident iff max evidence >= tau.
+
+    With no keywords this is the frozen ranker. ``evidence_signals`` swaps which signals feed
+    each class; the threshold depends on that choice, so pass the matching ``tau`` with it
+    (``rank_no_mlr`` does).
+    """
+    signals = _EVIDENCE_SIGNALS if evidence_signals is None else evidence_signals
+    threshold = null.tau if tau is None else tau
+    hypotheses = _hypotheses(robust_z(null, stats), list(stats), threshold, signals)
+    incident = bool(hypotheses) and _max_evidence(hypotheses) >= threshold
+    return Ranking("ranker", hypotheses, incident, threshold)
+
+
+def rank_no_mlr(null: NullModel, stats: Mapping[str, ColumnStats]) -> Ranking:
+    """The exploratory variant: ``unit_break`` without ``median_log_ratio``, with its own tau."""
+    if null.tau_no_mlr is None:
+        raise ValueError("this null model has no tau for the variant; refit it")
+    return rank(null, stats, evidence_signals=NO_MLR_EVIDENCE_SIGNALS, tau=null.tau_no_mlr)
 
 
 def _max_evidence(hypotheses: Sequence[Hypothesis]) -> float:
@@ -217,6 +265,10 @@ def _median_and_scale(values: np.ndarray) -> tuple[float, float]:
 def fit_null_model_from_stats(
     first: Sequence[Mapping[str, ColumnStats]],
     second: Sequence[Mapping[str, ColumnStats]],
+    *,
+    evidence_signals: Mapping[FaultClass, tuple[str, ...]] | None = None,
+    variant_signals: Mapping[FaultClass, tuple[str, ...]] | None = None,
+    window_size: int = 1000,
 ) -> NullModel:
     """Fit the null model from per-window column statistics (no windows needed).
 
@@ -224,6 +276,11 @@ def fit_null_model_from_stats(
     no-fault windows whose maximum evidence sets tau, so tau is not fitted on the same
     windows that define the scores. tau is ``np.percentile(max_evidences, 99)`` with numpy's
     default linear interpolation.
+
+    ``evidence_signals`` (default: the frozen mapping) says which signals feed tau.
+    ``variant_signals``, when given, also fits ``tau_no_mlr`` for that mapping from the same
+    second set; medians and scales do not depend on the mapping, so one fit serves both.
+    ``window_size`` records the length the calibration windows had.
     """
     if not first or not second:
         raise ValueError("both calibration sets need at least one window")
@@ -233,10 +290,19 @@ def fit_null_model_from_stats(
         for signal in SIGNALS:
             values = np.array([getattr(w[column], signal) for w in first], dtype=float)
             medians[(signal, column)], scales[(signal, column)] = _median_and_scale(values)
-    provisional = NullModel(medians, scales, tau=math.inf)
-    max_evidences = [_max_evidence(rank(provisional, w).hypotheses) for w in second]
-    tau = float(np.percentile(max_evidences, TAU_PERCENTILE))
-    return dataclasses.replace(provisional, tau=tau)
+    provisional = NullModel(medians, scales, tau=math.inf, window_size=window_size)
+
+    def fit_tau(signals: Mapping[FaultClass, tuple[str, ...]]) -> float:
+        # The maximum evidence does not depend on tau; only the order inside a column does.
+        peaks = [
+            _max_evidence(_hypotheses(robust_z(provisional, w), list(w), math.inf, signals))
+            for w in second
+        ]
+        return float(np.percentile(peaks, TAU_PERCENTILE))
+
+    tau = fit_tau(_EVIDENCE_SIGNALS if evidence_signals is None else evidence_signals)
+    tau_no_mlr = None if variant_signals is None else fit_tau(variant_signals)
+    return dataclasses.replace(provisional, tau=tau, tau_no_mlr=tau_no_mlr)
 
 
 def fit_null_model(
@@ -244,12 +310,14 @@ def fit_null_model(
     pool: pd.DataFrame,
     *,
     window_size: int = 1000,
+    evidence_signals: Mapping[FaultClass, tuple[str, ...]] | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> NullModel:
     """Fit the null model from 200 + 200 no-fault windows drawn from the calibration pool.
 
-    The first seed range gives medians and MADs, the second gives tau. The imports are local
-    so the pure maths above does not require the window machinery.
+    The first seed range gives medians and MADs, the second gives tau, and from the same
+    second set ``tau_no_mlr`` for the exploratory variant. The imports are local so the pure
+    maths above does not require the window machinery.
     """
     from mlops_pipeline.incident.faults import calibration_seeds, calibration_window
     from mlops_pipeline.monitor.stats import column_stats
@@ -267,4 +335,10 @@ def fit_null_model(
             if progress is not None:
                 progress(done, total)
         sets.append(collected)
-    return fit_null_model_from_stats(sets[0], sets[1])
+    return fit_null_model_from_stats(
+        sets[0],
+        sets[1],
+        evidence_signals=evidence_signals,
+        variant_signals=NO_MLR_EVIDENCE_SIGNALS,
+        window_size=window_size,
+    )

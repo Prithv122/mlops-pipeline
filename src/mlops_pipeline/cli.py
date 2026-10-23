@@ -7,17 +7,25 @@ Heavy imports (MLflow, LightGBM, FastAPI, Evidently) happen inside each command 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 DEFAULT_DATA = "data/credit_default.csv.gz"
 DEFAULT_TRACKING = "sqlite:///mlstore/mlflow.db"
+
+#: What the one-time evaluation is allowed to run on (PREREGISTRATION.md, Amendment 2).
+PROTOCOL_WINDOW_SIZE = 1000
+#: SHA-256 of the vendored data cache, ``data/credit_default.csv.gz``.
+PROTOCOL_DATA_SHA256 = "c4fdd4c967cba262fd21be076cddece7ca18fd052eb19fb755b4938919c143f9"
 
 
 def _read(path: str):
@@ -35,18 +43,57 @@ def _parse_time(text: str) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
+def _file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _repo_root() -> Path | None:
+    """The folder holding ``pyproject.toml`` above this file, or None for an installed copy."""
+    for folder in Path(__file__).resolve().parents:
+        if (folder / "pyproject.toml").is_file():
+            return folder
+    return None
+
+
 def _git_state() -> tuple[str | None, bool]:
-    """Current commit and whether the working tree is clean; (None, False) outside git."""
+    """Commit and cleanliness of the repository this code lives in; (None, False) outside git.
+
+    Git runs with ``-C`` on the repository root found from this file, so the answer does not
+    depend on the folder the command was started from.
+    """
+    root = _repo_root()
+    if root is None:
+        return None, False
     try:
         sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True, check=True
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None, False
     return sha, not dirty
+
+
+def _library_versions() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for name in ("numpy", "pandas", "scipy", "mlops-pipeline"):
+        try:
+            out[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            out[name] = "unknown"
+    return out
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
@@ -87,34 +134,59 @@ def cmd_retrain(args: argparse.Namespace) -> int:
 
     from mlops_pipeline.registry import retrain
 
-    decision = retrain(_read(args.data), tracking_uri=args.tracking_uri, seed=args.seed)
+    decision = retrain(
+        _read(args.data), tracking_uri=args.tracking_uri, seed=args.seed, data_path=args.data
+    )
     print(json.dumps(asdict(decision)))
     return 0
 
 
-def _responder(settings, null_model_path: str | None):
+def _load_null_model(path: str | None, digest: str, window_size: int):
+    """A saved null model, or None when it is missing or was not fitted for this setup."""
+    from mlops_pipeline.incident.ranker import NullModel
+
+    if not path or not Path(path).exists():
+        return None
+    try:
+        null = NullModel.from_json(path)
+    except (ValueError, KeyError):
+        return None
+    if null.reference_sha256 != digest or null.window_size != window_size:
+        return None
+    return null
+
+
+def _responder(settings, null_model_path: str | None, *, window_size: int = 1000):
     """Reference frame and profile plus the no-fault calibration (loaded from JSON when given).
 
     The reference is the train split of ``settings.reference_path``, the same rows the
-    evaluation compares windows with, so the API and the scored responder are one thing.
+    evaluation compares windows with, so the API and the scored responder are one thing. A
+    saved calibration is trusted only if it was fitted on this reference file at this window
+    size; otherwise it is refitted and overwritten, because a stale one scores the wrong data.
+    The responder exposes ``min_rows``: the scores are only calibrated for windows that long.
     """
+    import dataclasses
+
     from mlops_pipeline.evaluate import fit_responder
     from mlops_pipeline.incident.analyser import analyse
-    from mlops_pipeline.incident.ranker import NullModel
     from mlops_pipeline.model.data import split
     from mlops_pipeline.monitor.stats import profile
 
     df = _read(settings.reference_path)
     reference = split(df, seed=0).train
-    if null_model_path and Path(null_model_path).exists():
+    digest = _file_sha256(settings.reference_path)
+    null = _load_null_model(null_model_path, digest, window_size)
+    if null is not None:
         ref = profile(reference)
-        null = NullModel.from_json(null_model_path)
     else:
-        ref, null = fit_responder(df)
+        ref, fitted = fit_responder(df, window_size=window_size)
+        null = dataclasses.replace(fitted, reference_sha256=digest)
         if null_model_path:
             null.to_json(null_model_path)
 
     class _Responder:
+        min_rows = null.window_size
+
         def respond(self, window):
             return analyse(ref, null, window)
 
@@ -134,7 +206,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
-    from mlops_pipeline.monitor.run import monitor_once, post_alert
+    from mlops_pipeline.monitor.run import monitor_window, post_alert
     from mlops_pipeline.predlog import PredictionLog
     from mlops_pipeline.serve.settings import get_settings
 
@@ -147,7 +219,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         if args.webhook:
             post_alert(args.webhook)(alert)
 
-    ranking = monitor_once(
+    result = monitor_window(
         PredictionLog(settings.predlog_path),
         ref,
         null,
@@ -157,11 +229,14 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         report_dir=Path(args.report_dir) if args.report_dir else None,
         reference_frame=reference,
     )
+    ranking = result.ranking
     top = ranking.top if ranking else None
     print(
         json.dumps(
             {
-                "rows_seen": ranking is not None,
+                "status": result.status,
+                "rows": result.rows,
+                "min_rows": result.min_rows,
                 "incident": bool(ranking and ranking.incident),
                 "top": None if top is None else {"cause": top.cause, "column": top.column},
                 "alerts": alerts,
@@ -200,14 +275,33 @@ def cmd_inject(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refuse_full_run(args: argparse.Namespace, clean: bool) -> str | None:
+    """Why the one-time evaluation may not start, or None when every guard passes."""
+    if args.window_size != PROTOCOL_WINDOW_SIZE:
+        return (
+            f"the full evaluation uses windows of {PROTOCOL_WINDOW_SIZE} rows, "
+            f"not {args.window_size}"
+        )
+    if not Path(args.data).is_file():
+        return f"data file not found: {args.data}"
+    if _file_sha256(args.data) != PROTOCOL_DATA_SHA256:
+        return "the data file is not the vendored cache the protocol was frozen on (hash differs)"
+    if not clean and not args.allow_dirty:
+        return "the full evaluation runs once, from a clean committed tree; commit first"
+    if (Path(args.out) / "records.csv").exists():
+        return f"{args.out} already holds records.csv; the full evaluation runs once"
+    return None
+
+
 def cmd_eval_responder(args: argparse.Namespace) -> int:
     from mlops_pipeline.evaluate import run_evaluation, summarise, write_report
     from mlops_pipeline.incident.faults import dev_grid, eval_grid
 
     sha, clean = _git_state()
     if args.full:
-        if not clean and not args.allow_dirty:
-            print("the full evaluation runs once, from a clean committed tree; commit first")
+        reason = _refuse_full_run(args, clean)
+        if reason:
+            print(reason)
             return 2
         scenarios = eval_grid()
     else:
@@ -218,9 +312,13 @@ def cmd_eval_responder(args: argparse.Namespace) -> int:
     summary["provenance"] = {
         "mode": "full" if args.full else "smoke",
         "data": args.data,
+        "data_sha256": _file_sha256(args.data),
         "window_size": args.window_size,
         "commit": sha,
         "tree_clean": clean,
+        "allow_dirty": bool(args.allow_dirty),
+        "python": platform.python_version(),
+        "versions": _library_versions(),
         "started_utc": started.isoformat(timespec="seconds"),
         "finished_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     }

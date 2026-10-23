@@ -10,8 +10,6 @@ import pytest
 pytest.importorskip("mlops_pipeline.monitor.stats")
 pytest.importorskip("mlops_pipeline.incident.faults")
 
-from mlops_pipeline.incident.faults import dev_grid
-
 from mlops_pipeline.evaluate import (
     RECORD_COLUMNS,
     fit_responder,
@@ -19,6 +17,7 @@ from mlops_pipeline.evaluate import (
     summarise,
     write_report,
 )
+from mlops_pipeline.incident.faults import dev_grid
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "credit_sample.csv.gz"
 WINDOW = 200  # the fixture's valid and test pools hold 600 rows, below the usual 1,000
@@ -49,7 +48,14 @@ def test_run_evaluation_on_the_fixture_dev_grid(df: pd.DataFrame, tmp_path) -> N
     assert len(controls) == 2
     assert controls["ranker_top1"].isna().all()
 
+    sens = [c for c in RECORD_COLUMNS if c.startswith("sens_")]
+    assert len(sens) == 6 and list(records.columns[-6:]) == sens
+    assert faults["sens_top1"].isin([0.0, 1.0]).all()
+    assert controls["sens_top1"].isna().all()
+    assert records["sens_incident"].isin([True, False]).all()
+
     summary = summarise(records)
+    assert summary["sensitivity"] is not None
     assert summary["n_scenarios"] == len(scenarios)
     write_report(records, summary, tmp_path)
     assert (tmp_path / "REPORT.md").read_text(encoding="utf-8").startswith("# Incident")
@@ -59,4 +65,6 @@ def test_fit_responder_returns_reference_and_null_model(df: pd.DataFrame) -> Non
     ref, null = fit_responder(df, window_size=WINDOW)
     assert ref is not None
     assert null.tau >= 0.0
+    assert null.window_size == WINDOW
+    assert null.tau_no_mlr is not None and null.tau_no_mlr >= 0.0
     assert len(null.medians) == len(null.scales) == 6 * 23

@@ -176,3 +176,244 @@ def test_cli_full_evaluation_refuses_a_dirty_tree(tmp_path: Path, monkeypatch) -
     args = ["eval-responder", "--full", "--data", str(FIXTURE), "--out", str(tmp_path)]
     assert main(args) == 2
     assert not (tmp_path / "records.csv").exists()
+
+
+# ----------------------------------------------------------------- run guard and provenance
+
+
+def _no_window_drawn(monkeypatch) -> None:
+    """Make any attempt to evaluate a window fail the test."""
+    from mlops_pipeline import evaluate
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a guard let the evaluation start")
+
+    monkeypatch.setattr(evaluate, "run_evaluation", boom)
+
+
+def _full_args(out: Path, *extra: str) -> list[str]:
+    return ["eval-responder", "--full", "--data", str(FIXTURE), "--out", str(out), *extra]
+
+
+def test_full_evaluation_refuses_another_window_size(tmp_path: Path, monkeypatch) -> None:
+    from mlops_pipeline import cli
+
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc", True))
+    monkeypatch.setattr(cli, "PROTOCOL_DATA_SHA256", cli._file_sha256(FIXTURE))
+    _no_window_drawn(monkeypatch)
+    assert main(_full_args(tmp_path, "--window-size", "500")) == 2
+    assert not (tmp_path / "records.csv").exists()
+
+
+def test_full_evaluation_refuses_data_that_is_not_the_vendored_cache(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from mlops_pipeline import cli
+
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc", True))
+    _no_window_drawn(monkeypatch)
+    # the fixture is not the 30,000-row cache the protocol was frozen on
+    assert main(_full_args(tmp_path, "--window-size", "1000")) == 2
+    assert "hash differs" in capsys.readouterr().out
+    assert not (tmp_path / "records.csv").exists()
+
+
+def test_the_pinned_hash_is_the_vendored_caches() -> None:
+    from mlops_pipeline import cli
+
+    cache = Path(__file__).resolve().parents[2] / "data" / "credit_default.csv.gz"
+    assert cli._file_sha256(cache) == cli.PROTOCOL_DATA_SHA256
+
+
+def test_full_evaluation_never_overwrites_an_earlier_result(tmp_path: Path, monkeypatch) -> None:
+    from mlops_pipeline import cli
+
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc", True))
+    monkeypatch.setattr(cli, "PROTOCOL_DATA_SHA256", cli._file_sha256(FIXTURE))
+    _no_window_drawn(monkeypatch)
+    earlier = tmp_path / "records.csv"
+    earlier.write_text("the one-time result", encoding="utf-8")
+    assert main(_full_args(tmp_path, "--window-size", "1000")) == 2
+    assert earlier.read_text(encoding="utf-8") == "the one-time result"
+
+
+def test_full_evaluation_starts_when_every_guard_passes(tmp_path: Path, monkeypatch) -> None:
+    from mlops_pipeline import cli, evaluate
+
+    class Reached(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        raise Reached
+
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc", True))
+    monkeypatch.setattr(cli, "PROTOCOL_DATA_SHA256", cli._file_sha256(FIXTURE))
+    monkeypatch.setattr(evaluate, "run_evaluation", stop)
+    with pytest.raises(Reached):
+        main(_full_args(tmp_path, "--window-size", "1000"))
+
+
+def test_full_evaluation_with_the_dirty_override_records_it_in_the_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mlops_pipeline import cli, evaluate
+    from mlops_pipeline.incident.faults import dev_grid
+
+    cached = evaluate.run_evaluation(pd.read_csv(FIXTURE), dev_grid(1, 2), window_size=WINDOW)
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc", False))
+    monkeypatch.setattr(cli, "PROTOCOL_DATA_SHA256", cli._file_sha256(FIXTURE))
+    monkeypatch.setattr(evaluate, "run_evaluation", lambda *a, **k: cached)
+    assert main(_full_args(tmp_path, "--window-size", "1000", "--allow-dirty")) == 0
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["provenance"]["mode"] == "full"
+    assert summary["provenance"]["tree_clean"] is False
+    assert summary["provenance"]["allow_dirty"] is True
+    assert "tree was not clean" in (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+
+
+def test_smoke_provenance_carries_data_hash_and_versions(tmp_path: Path) -> None:
+    import hashlib
+    import platform
+
+    args = ["eval-responder", "--smoke", "--data", str(FIXTURE), "--out", str(tmp_path)]
+    args += ["--window-size", str(WINDOW), "--dev-seeds", "1", "--dev-controls", "2"]
+    assert main(args) == 0
+    prov = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))["provenance"]
+    assert prov["data_sha256"] == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    assert prov["data"] == str(FIXTURE)
+    assert prov["window_size"] == WINDOW
+    assert prov["allow_dirty"] is False
+    assert prov["python"] == platform.python_version()
+    assert set(prov["versions"]) == {"numpy", "pandas", "scipy", "mlops-pipeline"}
+    assert all(v and v != "unknown" for v in prov["versions"].values())
+    assert {"commit", "tree_clean", "started_utc", "finished_utc"} <= set(prov)
+    report = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    assert "## Provenance" in report and prov["data_sha256"] in report
+    assert "Exploratory sensitivity (declared before the run, not a hypothesis test)" in report
+    assert "This arm does not change the H1/H2 verdicts above." in report
+
+
+def test_git_state_runs_git_in_the_repository_root_not_the_current_folder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import subprocess
+
+    from mlops_pipeline import cli
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        out = "deadbeef\n" if "rev-parse" in cmd else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=out)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    root = cli._repo_root()
+    assert root is not None and (root / "pyproject.toml").is_file()
+    assert cli._git_state() == ("deadbeef", True)
+    assert len(calls) == 2
+    for cmd in calls:
+        assert cmd[:3] == ["git", "-C", str(root)]
+
+
+# ------------------------------------------------------------- CLI: retrain, monitor, responder
+
+
+def test_retrain_passes_the_data_path_for_provenance(monkeypatch) -> None:
+    from mlops_pipeline import registry
+    from mlops_pipeline.registry import RetrainDecision
+
+    seen: dict = {}
+
+    def fake_retrain(df, **kwargs):
+        seen.update(kwargs)
+        return RetrainDecision(True, "2", "1", "ok")
+
+    monkeypatch.setattr(registry, "retrain", fake_retrain)
+    assert main(["retrain", "--data", str(FIXTURE), "--tracking-uri", "sqlite:///x.db"]) == 0
+    assert seen["data_path"] == str(FIXTURE)
+
+
+def _null_stub(window_size: int):
+    from mlops_pipeline.incident.ranker import SIGNALS, NullModel
+
+    keys = [(s, c) for s in SIGNALS for c in FEATURE_COLS]
+    return NullModel({k: 0.0 for k in keys}, {k: 1.0 for k in keys}, 1.0, window_size=window_size)
+
+
+def test_cli_responder_refits_when_the_saved_model_is_for_another_file_or_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import dataclasses
+    from types import SimpleNamespace
+
+    from mlops_pipeline import cli, evaluate
+    from mlops_pipeline.incident.ranker import NullModel
+    from mlops_pipeline.monitor.stats import profile
+
+    fits: list[int] = []
+
+    def fake_fit(df, *, window_size=1000, progress=None):
+        fits.append(window_size)
+        return profile(split(df, seed=0).train), _null_stub(window_size)
+
+    monkeypatch.setattr(evaluate, "fit_responder", fake_fit)
+    settings = SimpleNamespace(reference_path=str(FIXTURE))
+    saved = tmp_path / "null.json"
+    digest = cli._file_sha256(FIXTURE)
+
+    *_, responder = cli._responder(settings, str(saved), window_size=200)
+    assert fits == [200] and responder.min_rows == 200
+    stored = NullModel.from_json(saved)
+    assert (stored.reference_sha256, stored.window_size) == (digest, 200)
+
+    cli._responder(settings, str(saved), window_size=200)
+    assert fits == [200]  # same file and size: the saved model is trusted
+
+    *_, responder = cli._responder(settings, str(saved), window_size=100)
+    assert fits == [200, 100] and responder.min_rows == 100  # another window size: refitted
+    assert NullModel.from_json(saved).window_size == 100  # and overwritten
+
+    current = NullModel.from_json(saved)
+    dataclasses.replace(current, reference_sha256="0" * 64).to_json(saved)
+    cli._responder(settings, str(saved), window_size=100)
+    assert fits == [200, 100, 100]  # another reference file: refitted
+    assert NullModel.from_json(saved).reference_sha256 == digest
+
+    # a calibration written before the hash existed has none, so it is not trusted either
+    dataclasses.replace(current, reference_sha256=None).to_json(saved)
+    cli._responder(settings, str(saved), window_size=100)
+    assert len(fits) == 4
+
+
+def test_cli_monitor_reports_insufficient_rows_with_the_minimum(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from mlops_pipeline import cli
+    from mlops_pipeline.predlog import PredictionLog
+    from mlops_pipeline.serve import settings as settings_module
+
+    path = tmp_path / "predlog.sqlite"
+    log = PredictionLog(path)
+    for minute in range(3):
+        log.append(
+            ts=datetime(2026, 1, 1, 0, minute, tzinfo=UTC),
+            model_version="1",
+            features={c: 1.0 for c in FEATURE_COLS},
+            exposure=1.0,
+            p_default=0.2,
+            flag=False,
+        )
+    monkeypatch.setattr(
+        settings_module, "get_settings", lambda: SimpleNamespace(predlog_path=str(path))
+    )
+    monkeypatch.setattr(cli, "_responder", lambda *a, **k: (None, object(), _null_stub(10), None))
+    args = ["monitor", "--start", "2026-01-01T00:00:00", "--end", "2026-01-01T01:00:00"]
+    assert main(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "insufficient_rows"
+    assert (out["rows"], out["min_rows"]) == (3, 10)
+    assert out["incident"] is False and out["alerts"] == [] and out["top"] is None

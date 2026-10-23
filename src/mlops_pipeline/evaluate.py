@@ -45,6 +45,13 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "baseline_incident",
     "baseline_top_column",
     "baseline_max_psi",
+    # Exploratory arm S1 (PREREGISTRATION.md, Amendment 2), appended so nothing above moves.
+    "sens_top1",
+    "sens_rr",
+    "sens_cause_top1",
+    "sens_incident",
+    "sens_top_column",
+    "sens_top_cause",
 )
 
 H1_MIN_DIFF = 0.15
@@ -97,10 +104,13 @@ def _max_evidence(ranking: Ranking) -> float:
     return max(values) if values else math.nan
 
 
-def _record(scenario: Scenario, ranker: Ranking, baseline: Ranking) -> dict[str, Any]:
+def _record(
+    scenario: Scenario, ranker: Ranking, baseline: Ranking, variant: Ranking
+) -> dict[str, Any]:
     r = score_ranking(ranker, scenario.fault, scenario.columns)
     b = score_ranking(baseline, scenario.fault, scenario.columns)
-    r_top, b_top = ranker.top, baseline.top
+    v = score_ranking(variant, scenario.fault, scenario.columns)
+    r_top, b_top, v_top = ranker.top, baseline.top, variant.top
     return {
         "scenario_id": scenario.scenario_id,
         "fault": scenario.fault,
@@ -119,6 +129,12 @@ def _record(scenario: Scenario, ranker: Ranking, baseline: Ranking) -> dict[str,
         "baseline_incident": baseline.incident,
         "baseline_top_column": b_top.column if b_top else "",
         "baseline_max_psi": _max_evidence(baseline),
+        "sens_top1": v["top1"],
+        "sens_rr": v["rr"],
+        "sens_cause_top1": v["cause_top1"],
+        "sens_incident": variant.incident,
+        "sens_top_column": v_top.column if v_top else "",
+        "sens_top_cause": v_top.cause if v_top else "",
     }
 
 
@@ -153,10 +169,13 @@ def run_evaluation(
     window_size: int = 1000,
     progress: Progress | None = None,
 ) -> pd.DataFrame:
-    """Score the ranker and the baseline on one window per scenario; one row each."""
+    """Score the ranker, the baseline and the exploratory variant on one window per scenario.
+
+    The variant (``sens_*`` columns) reads the same statistics; it never feeds H1 or H2.
+    """
     from mlops_pipeline.incident.analyser import analyse
     from mlops_pipeline.incident.faults import draw_window
-    from mlops_pipeline.incident.ranker import psi_baseline
+    from mlops_pipeline.incident.ranker import psi_baseline, rank_no_mlr
 
     parts = split(df, seed=0)
     ref, null = _fit_on_split(parts, window_size, progress)
@@ -164,7 +183,7 @@ def run_evaluation(
     for i, scenario in enumerate(scenarios, start=1):
         window = draw_window(parts.test, scenario, parts.train, size=window_size)
         stats, ranker = analyse(ref, null, window)
-        rows.append(_record(scenario, ranker, psi_baseline(stats)))
+        rows.append(_record(scenario, ranker, psi_baseline(stats), rank_no_mlr(null, stats)))
         if progress is not None:
             progress(i, len(scenarios))
     return pd.DataFrame(rows, columns=list(RECORD_COLUMNS))
@@ -244,6 +263,51 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def _sensitivity(df: pd.DataFrame) -> dict[str, Any] | None:
+    """Exploratory arm S1: unit_break evidence without median_log_ratio.
+
+    ``None`` for records written before the arm existed. Nothing here enters H1 or H2.
+    """
+    if "sens_top1" not in df.columns or df["sens_incident"].isna().any():
+        return None
+    faults = df[df["fault"] != CONTROL]
+    controls = df[df["fault"] == CONTROL]
+
+    def slice_metrics(part: pd.DataFrame) -> dict[str, Any]:
+        return {
+            "n": len(part),
+            "sens_top1": _mean(part["sens_top1"]),
+            "sens_mrr": _mean(part["sens_rr"]),
+            "sens_cause_top1": _mean(part["sens_cause_top1"]),
+            "sens_detection": _mean(part["sens_incident"].astype(float)),
+            # The frozen ranker on the same rows, for reading the arm against it.
+            "ranker_top1": _mean(part["ranker_top1"]),
+            "ranker_cause_top1": _mean(part["ranker_cause_top1"]),
+            "ranker_detection": _mean(part["ranker_incident"].astype(float)),
+        }
+
+    n_controls = len(controls)
+    k = int(controls["sens_incident"].astype(bool).sum())
+    lo_w, hi_w = wilson(k, n_controls)
+    diff, lo, hi = paired_bootstrap(faults["sens_top1"], faults["baseline_top1"])
+    return {
+        "overall": slice_metrics(faults),
+        "by_class": {
+            c: slice_metrics(faults[faults["fault"] == c])
+            for c in FAULT_CLASSES
+            if (faults["fault"] == c).any()
+        },
+        "controls": {
+            "n": n_controls,
+            "false_incidents": k,
+            "false_incident_rate": k / n_controls if n_controls else math.nan,
+            "wilson_lo": lo_w,
+            "wilson_hi": hi_w,
+        },
+        "vs_baseline": {"mean_diff": diff, "lo": lo, "hi": hi},
+    }
+
+
 def summarise(records: pd.DataFrame | Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Every pre-registered metric, overall and by class, severity and class x severity."""
     df = pd.DataFrame(records)
@@ -320,6 +384,7 @@ def summarise(records: pd.DataFrame | Sequence[Mapping[str, Any]]) -> dict[str, 
         "bootstrap": bootstrap,
         "h1": h1,
         "h2": h2,
+        "sensitivity": _sensitivity(df),
     }
     return _clean(summary)
 
@@ -364,6 +429,74 @@ def _table(label: str, rows: Mapping[str, Mapping[str, Any]]) -> list[str]:
         ]
         lines.append("| " + " | ".join(cells) + " |")
     return lines
+
+
+_SENS_TITLE = (
+    "Exploratory sensitivity (declared before the run, not a hypothesis test): "
+    "unit_break without median_log_ratio"
+)
+
+
+def _sensitivity_lines(sens: Mapping[str, Any]) -> list[str]:
+    ctl, vs = sens["controls"], sens["vs_baseline"]
+    lines = [
+        f"## {_SENS_TITLE}",
+        "",
+        "Same windows and signals as the ranker above, except that `unit_break` evidence is "
+        "`out_of_range` only; the variant has its own tau, fitted the same way on the same "
+        "calibration windows. Declared in `PREREGISTRATION.md` Amendment 2.",
+        "",
+        "| class | n | column top-1 | cause top-1 | detection "
+        "| ranker cause top-1 | ranker detection |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    rows = {"all": sens["overall"], **sens["by_class"]}
+    for name, m in rows.items():
+        cells = [
+            name,
+            str(m["n"]),
+            _fmt(m["sens_top1"]),
+            _fmt(m["sens_cause_top1"]),
+            _fmt(m["sens_detection"]),
+            _fmt(m["ranker_cause_top1"]),
+            _fmt(m["ranker_detection"]),
+        ]
+        lines.append("| " + " | ".join(cells) + " |")
+    lines += [
+        "",
+        f"- Control false incidents: {ctl['false_incidents']} of {ctl['n']}, rate "
+        f"{_fmt(ctl['false_incident_rate'])}, Wilson 95% interval {_fmt(ctl['wilson_lo'])} "
+        f"to {_fmt(ctl['wilson_hi'])}.",
+        f"- Column top-1 minus baseline column top-1 = {_fmt(vs['mean_diff'])} "
+        f"(95% interval {_fmt(vs['lo'])} to {_fmt(vs['hi'])}).",
+        "",
+        "This arm does not change the H1/H2 verdicts above.",
+        "",
+    ]
+    return lines
+
+
+def _provenance_lines(prov: Mapping[str, Any]) -> list[str]:
+    versions = prov.get("versions", {})
+    lines = [
+        "## Provenance",
+        "",
+        f"- Mode: {prov.get('mode')}",
+        f"- Commit: {prov.get('commit') or 'none (not a git checkout)'}",
+        f"- Tree clean: {prov.get('tree_clean')}; allow-dirty used: {prov.get('allow_dirty')}",
+        f"- Data: `{prov.get('data')}`, SHA-256 `{prov.get('data_sha256')}`",
+        f"- Window size: {prov.get('window_size')}",
+        f"- Python: {prov.get('python')}",
+        "- Libraries: " + ", ".join(f"{k} {v}" for k, v in versions.items()),
+        f"- Started (UTC): {prov.get('started_utc')}; finished (UTC): {prov.get('finished_utc')}",
+    ]
+    if prov.get("allow_dirty") and not prov.get("tree_clean"):
+        lines += [
+            "",
+            "WARNING: tree was not clean when this ran (the dirty-tree override was used), so "
+            "the commit above does not fully describe the code that produced these numbers.",
+        ]
+    return [*lines, ""]
 
 
 def _report_text(summary: Mapping[str, Any]) -> str:
@@ -414,6 +547,10 @@ def _report_text(summary: Mapping[str, Any]) -> str:
         *_table("class and severity", summary["by_class_severity"]),
         "",
     ]
+    if summary.get("sensitivity"):
+        lines += _sensitivity_lines(summary["sensitivity"])
+    if summary.get("provenance"):
+        lines += _provenance_lines(summary["provenance"])
     return "\n".join(lines)
 
 

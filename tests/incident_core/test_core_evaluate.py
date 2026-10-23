@@ -149,6 +149,8 @@ def rec(
     r_inc: bool,
     b_inc: bool,
     cause: float | None = None,
+    s1: float | None = None,
+    s_inc: bool | None = None,
 ) -> dict:
     """One hand-made record; fault rows carry scores, controls carry NaN."""
     is_control = fault == CONTROL
@@ -171,6 +173,12 @@ def rec(
         "baseline_incident": b_inc,
         "baseline_top_column": "AGE",
         "baseline_max_psi": 0.3,
+        "sens_top1": nan if is_control else (r1 if s1 is None else s1),
+        "sens_rr": nan if is_control else (1.0 if (r1 if s1 is None else s1) else 0.5),
+        "sens_cause_top1": nan if is_control else (r1 if s1 is None else s1),
+        "sens_incident": r_inc if s_inc is None else s_inc,
+        "sens_top_column": "AGE",
+        "sens_top_cause": "covariate_shift",
     }
 
 
@@ -306,4 +314,99 @@ def test_record_columns_match_the_design() -> None:
         "ranker_cause_top1", "ranker_incident", "ranker_top_column", "ranker_top_cause",
         "ranker_max_evidence", "baseline_top1", "baseline_rr", "baseline_incident",
         "baseline_top_column", "baseline_max_psi",
+        "sens_top1", "sens_rr", "sens_cause_top1", "sens_incident", "sens_top_column",
+        "sens_top_cause",
     )  # fmt: skip
+
+
+# --------------------------------------------------- exploratory sensitivity arm
+
+
+def _verdict_block(text: str) -> str:
+    return text[text.index("## Verdicts") : text.index("## Control windows")]
+
+
+def test_sensitivity_section_is_labelled_and_leaves_the_verdicts_alone(tmp_path) -> None:
+    base = records_frame([(1, 0)] * 40, 5, 200)
+    flipped = base.copy()
+    flipped["sens_top1"] = flipped["sens_top1"].map(lambda v: v if math.isnan(v) else 1 - v)
+    flipped["sens_incident"] = ~flipped["sens_incident"].astype(bool)
+    texts = []
+    for name, frame in (("a", base), ("b", flipped)):
+        summary = summarise(frame)
+        write_report(frame, summary, tmp_path / name)
+        texts.append((summary, (tmp_path / name / "REPORT.md").read_text(encoding="utf-8")))
+
+    (sa, ta), (sb, tb) = texts
+    title = (
+        "## Exploratory sensitivity (declared before the run, not a hypothesis test): "
+        "unit_break without median_log_ratio"
+    )
+    assert title in ta and title in tb
+    assert "This arm does not change the H1/H2 verdicts above." in ta
+    assert ta.index("## Verdicts") < ta.index(title)
+    # H1 and H2 come from the frozen ranker only
+    assert sa["h1"] == sb["h1"] and sa["h2"] == sb["h2"]
+    assert _verdict_block(ta) == _verdict_block(tb)
+    assert "H1: PASS" in _verdict_block(tb)
+    assert sa["sensitivity"] != sb["sensitivity"]
+
+
+def test_sensitivity_metrics_and_paired_difference_against_the_baseline() -> None:
+    rows = [
+        rec("covariate_shift", 0, 10_000, r1=1, b1=0, r_inc=True, b_inc=False, s1=1, s_inc=True),
+        rec("covariate_shift", 0, 10_001, r1=1, b1=1, r_inc=True, b_inc=True, s1=0, s_inc=False),
+        rec("unit_break", 2, 10_000, r1=0, b1=0, r_inc=False, b_inc=True, s1=1, s_inc=True),
+        rec("unit_break", 2, 10_001, r1=1, b1=0, r_inc=True, b_inc=False, s1=1, s_inc=True),
+        rec(CONTROL, 0, 10_000, r1=0, b1=0, r_inc=False, b_inc=False, s_inc=True),
+        rec(CONTROL, 0, 10_001, r1=0, b1=0, r_inc=False, b_inc=False, s_inc=False),
+    ]
+    sens = summarise(pd.DataFrame(rows, columns=list(RECORD_COLUMNS)))["sensitivity"]
+    assert sens["overall"]["n"] == 4
+    assert sens["overall"]["sens_top1"] == pytest.approx(0.75)
+    assert sens["overall"]["ranker_top1"] == pytest.approx(0.75)
+    assert sens["by_class"]["unit_break"]["sens_top1"] == 1.0
+    assert sens["by_class"]["unit_break"]["ranker_top1"] == 0.5
+    assert sens["by_class"]["covariate_shift"]["sens_detection"] == 0.5
+    assert sens["controls"]["false_incidents"] == 1
+    assert sens["controls"]["false_incident_rate"] == 0.5
+    # baseline column top-1 is 0.25, the arm's is 0.75
+    assert sens["vs_baseline"]["mean_diff"] == pytest.approx(0.5)
+    assert sens["vs_baseline"]["lo"] <= 0.5 <= sens["vs_baseline"]["hi"]
+
+
+def test_records_from_before_the_arm_have_no_sensitivity_section(tmp_path) -> None:
+    frame = records_frame([(1, 0)] * 6, 4, 20).drop(
+        columns=[c for c in RECORD_COLUMNS if c.startswith("sens_")]
+    )
+    summary = summarise(frame)
+    assert summary["sensitivity"] is None
+    write_report(frame, summary, tmp_path)
+    assert "Exploratory sensitivity" not in (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+
+
+def test_report_prints_provenance_and_the_dirty_tree_line(tmp_path) -> None:
+    frame = records_frame([(1, 0)] * 6, 4, 20)
+    prov = {
+        "mode": "full",
+        "data": "data/x.csv.gz",
+        "data_sha256": "f" * 64,
+        "window_size": 1000,
+        "commit": "abc123",
+        "tree_clean": True,
+        "allow_dirty": False,
+        "python": "3.12.1",
+        "versions": {"numpy": "2.5.3", "pandas": "3.0.6"},
+        "started_utc": "2026-10-23T10:00:00+00:00",
+        "finished_utc": "2026-10-23T10:05:00+00:00",
+    }
+    for name, extra in (("clean", {}), ("dirty", {"tree_clean": False, "allow_dirty": True})):
+        summary = {**summarise(frame), "provenance": {**prov, **extra}}
+        write_report(frame, summary, tmp_path / name)
+    clean = (tmp_path / "clean" / "REPORT.md").read_text(encoding="utf-8")
+    dirty = (tmp_path / "dirty" / "REPORT.md").read_text(encoding="utf-8")
+    assert "## Provenance" in clean and "abc123" in clean and "numpy 2.5.3" in clean
+    assert "f" * 64 in clean and "3.12.1" in clean and "2026-10-23T10:05:00" in clean
+    assert clean.rindex("## Provenance") > clean.rindex("## Exploratory sensitivity")
+    assert "tree was not clean" not in clean
+    assert "tree was not clean" in dirty
