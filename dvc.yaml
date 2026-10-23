@@ -11,7 +11,7 @@ stages:
       - data/processed
 
   train:
-    cmd: mlops-pipeline train --data data/credit_default.csv.gz --tracking-uri sqlite:///mlstore/mlflow.db
+    cmd: mlops-pipeline train --data data/credit_default.csv.gz --tracking-uri sqlite:///mlstore/mlflow.db --metrics-out metrics/train.json
     deps:
       - data/credit_default.csv.gz
       - src/mlops_pipeline/train.py

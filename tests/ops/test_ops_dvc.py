@@ -19,7 +19,7 @@ def test_dvc_stages_and_commands():
     )
     assert stages["train"]["cmd"] == (
         "mlops-pipeline train --data data/credit_default.csv.gz "
-        "--tracking-uri sqlite:///mlstore/mlflow.db"
+        "--tracking-uri sqlite:///mlstore/mlflow.db --metrics-out metrics/train.json"
     )
     assert stages["eval_responder_smoke"]["cmd"] == (
         "mlops-pipeline eval-responder --smoke --data data/credit_default.csv.gz "
