@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
 from mlops_pipeline.contracts import ColumnStats, Ranking
+from mlops_pipeline.incident.display import column_suspects
 
 if TYPE_CHECKING:
     from mlops_pipeline.incident.webhook import IncidentAlert
@@ -79,13 +80,22 @@ def measured_section(stats: dict[str, ColumnStats], ranking: Ranking) -> str:
         "",
         f"## Top {TOP_HYPOTHESES} suspect columns (diagnosed cause of each)",
         "",
-        "| # | Cause | Column | Evidence |",
-        "|---|---|---|---|",
+        "| # | Column | Diagnosed cause | Cause evidence | Column score |",
+        "|---|---|---|---|---|",
     ]
-    for i, h in enumerate(ranking.top_causes(TOP_HYPOTHESES), start=1):
-        lines.append(f"| {i} | {h.cause} | {h.column} | {_num(h.evidence)} |")
+    for i, s in enumerate(column_suspects(ranking, TOP_HYPOTHESES), start=1):
+        h = s.hypothesis
+        lines.append(
+            f"| {i} | {h.column} | {h.cause} | {_num(h.evidence)} | {_num(s.column_score)} |"
+        )
     if not ranking.hypotheses:
-        lines.append("| - | none | none | - |")
+        lines.append("| - | none | none | - | - |")
+    lines += [
+        "",
+        "Columns are ordered by column score, the strongest evidence of any cause for that "
+        "column. The diagnosed cause is chosen by specificity among the causes at or above "
+        "the threshold, so its own evidence can be lower than the column score.",
+    ]
 
     lines += ["", f"## Raw signals for the top {TOP_COLUMNS} columns", ""]
     shown = 0

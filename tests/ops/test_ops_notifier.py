@@ -5,6 +5,7 @@ import json
 
 from ops_fakes import T0, T1, make_ranking
 
+from mlops_pipeline.contracts import Hypothesis, Ranking
 from mlops_pipeline.incident.notifier import JsonNotifier, SlackNotifier, alert_payload
 from mlops_pipeline.incident.webhook import IncidentAlert
 
@@ -26,6 +27,25 @@ def test_json_notifier_writes_one_parseable_line():
         "BILL_AMT2",
         "PAY_1",
     ]  # one cause per column
+    assert [t["column_score"] for t in parsed["top"]] == [412.5, 70.0, 9.5]
+
+
+def test_payload_carries_the_column_score_apart_from_the_diagnosed_evidence():
+    ranking = Ranking(
+        method="ranker",
+        hypotheses=(
+            Hypothesis("null_spike", "PAY_1", 15.0),
+            Hypothesis("covariate_shift", "PAY_1", 1000.0),
+        ),
+        incident=True,
+        threshold=12.5,
+    )
+    top = alert_payload(ALERT, ranking, None)["top"]
+    assert top == [
+        {"cause": "null_spike", "column": "PAY_1", "evidence": 15.0, "column_score": 1000.0}
+    ]
+    section = SlackNotifier(URL).build_payload(ALERT, ranking, None)["blocks"][1]["text"]["text"]
+    assert "cause evidence 15.00, column score 1000.00" in section
 
 
 def test_json_notifier_defaults_to_stdout(capsys):

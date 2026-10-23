@@ -7,7 +7,7 @@ import httpx
 import pandas as pd
 import pytest
 from fastapi import FastAPI
-from ops_fakes import FakeNotifier
+from ops_fakes import FakeNotifier, FakeResponder, make_log_frame
 
 from mlops_pipeline.incident.notifier import SlackNotifier
 from mlops_pipeline.incident.postmortem import BLIND_SPOT
@@ -44,7 +44,8 @@ def test_happy_path_writes_postmortem_and_notifies_once(make_state):
     response = post(build_app(state), BODY)
     assert response.status_code == 200
     data = response.json()
-    assert set(data) == {"alert_id", "incident", "rows", "top", "postmortem_path"}
+    assert set(data) == {"alert_id", "status", "incident", "rows", "top", "postmortem_path"}
+    assert data["status"] == "analysed"
     assert data["alert_id"] == BODY["alert_id"]
     assert data["incident"] is True
     assert data["rows"] == 5
@@ -53,7 +54,8 @@ def test_happy_path_writes_postmortem_and_notifies_once(make_state):
         "BILL_AMT2",
         "PAY_1",
     ]  # one cause per column
-    assert set(data["top"][0]) == {"cause", "column", "evidence"}
+    assert set(data["top"][0]) == {"cause", "column", "evidence", "column_score"}
+    assert data["top"][0]["column_score"] == pytest.approx(412.5)
 
     path = Path(data["postmortem_path"])
     assert path.name == f"{BODY['alert_id']}.md"
@@ -96,6 +98,7 @@ def test_empty_window_is_not_an_incident_and_writes_nothing(make_state, tmp_path
     assert response.status_code == 200
     assert response.json() == {
         "alert_id": BODY["alert_id"],
+        "status": "empty",
         "incident": False,
         "rows": 0,
         "top": [],
@@ -104,6 +107,52 @@ def test_empty_window_is_not_an_incident_and_writes_nothing(make_state, tmp_path
     assert not (tmp_path / "postmortems").exists()
     assert state.notifier.payloads == []
     assert state.responder.calls == 0
+
+
+def test_empty_window_is_not_remembered_so_late_rows_are_analysed(make_state):
+    empty = pd.DataFrame(columns=[*FEATURE_COLS, "exposure", "p_default", "flag", "ts"])
+    state = make_state(frame=empty)
+    app = build_app(state)
+    assert post(app, BODY).json()["status"] == "empty"
+
+    state.predlog.frame = make_log_frame()  # the rows arrive after the first delivery
+    data = post(app, BODY).json()
+    assert data["status"] == "analysed" and data["rows"] == 5
+    assert len(state.notifier.payloads) == 1
+    assert state.responder.calls == 1
+
+
+def test_short_window_gets_no_verdict_notification_or_postmortem(make_state, tmp_path):
+    state = make_state(responder=FakeResponder(min_rows=6))  # the frame holds 5 rows
+    response = post(build_app(state), BODY)
+    assert response.status_code == 200
+    assert response.json() == {
+        "alert_id": BODY["alert_id"],
+        "status": "insufficient_rows",
+        "incident": False,
+        "rows": 5,
+        "top": [],
+        "postmortem_path": None,
+    }
+    assert state.responder.calls == 0
+    assert state.notifier.payloads == []
+    assert not (tmp_path / "postmortems").exists()
+
+
+def test_short_window_is_not_remembered_and_is_judged_once_it_is_long_enough(make_state):
+    state = make_state(responder=FakeResponder(min_rows=6))
+    app = build_app(state)
+    assert post(app, BODY).json()["status"] == "insufficient_rows"
+
+    state.predlog.frame = make_log_frame(6)
+    data = post(app, BODY).json()
+    assert data["status"] == "analysed" and data["rows"] == 6
+    assert len(state.notifier.payloads) == 1
+
+
+def test_window_of_exactly_min_rows_is_analysed(make_state):
+    state = make_state(responder=FakeResponder(min_rows=5))
+    assert post(build_app(state), BODY).json()["status"] == "analysed"
 
 
 def test_window_end_before_start_is_422(make_state):

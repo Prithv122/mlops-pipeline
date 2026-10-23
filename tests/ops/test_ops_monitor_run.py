@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -29,9 +29,14 @@ def fake_analyser(monkeypatch):
     return types.SimpleNamespace(calls=calls, state=state)
 
 
-def run(log, alert, **kwargs):
+def null_model(window_size: int = 1):
+    """Stands in for the NullModel: the monitor only reads the window length it was fitted at."""
+    return types.SimpleNamespace(window_size=window_size)
+
+
+def run(log, alert, *, window_size: int = 1, **kwargs):
     return monitor_run.monitor_once(
-        log, object(), object(), start=T0, end=T1, alert=alert, **kwargs
+        log, object(), null_model(window_size), start=T0, end=T1, alert=alert, **kwargs
     )
 
 
@@ -40,7 +45,7 @@ def test_alert_raised_only_on_incident(fake_analyser):
     ranking = run(FakeLog(make_log_frame()), alerts.append)
     assert ranking is not None and ranking.incident
     assert len(alerts) == 1
-    assert alerts[0].alert_id == "drift-20260101T000000-20260101T010000"
+    assert alerts[0].alert_id == "drift-20260101T000000000000Z-20260101T010000000000Z"
     assert alerts[0].window_start == T0 and alerts[0].window_end == T1
     assert alerts[0].source == "monitor"
     assert list(fake_analyser.calls[0].columns) == list(FEATURE_COLS)
@@ -71,12 +76,69 @@ def test_alert_id_is_deterministic_for_naive_and_aware_times(fake_analyser):
         monitor_run.monitor_once(
             FakeLog(make_log_frame()),
             object(),
-            object(),
+            null_model(),
             start=start,
             end=end,
             alert=lambda a: ids.append(a.alert_id),
         )
-    assert ids == ["drift-20260304T050607-20260304T060607"] * 2
+    assert ids == ["drift-20260304T050607000000Z-20260304T060607000000Z"] * 2
+
+
+def test_alert_id_is_in_utc_whatever_the_offset(fake_analyser):
+    ist = timezone(timedelta(hours=5, minutes=30))
+    start = datetime(2026, 10, 23, 17, 9, 35, 123456, tzinfo=ist)
+    end = datetime(2026, 10, 23, 17, 10, 32, tzinfo=ist)
+    assert monitor_run.window_alert_id(start, end) == (
+        "drift-20261023T113935123456Z-20261023T114032000000Z"
+    )
+
+
+def test_windows_differing_by_a_microsecond_get_different_alert_ids():
+    start = datetime(2026, 10, 23, 11, 39, 35, tzinfo=UTC)
+    end = datetime(2026, 10, 23, 11, 40, 32, tzinfo=UTC)
+    a = monitor_run.window_alert_id(start, end)
+    b = monitor_run.window_alert_id(start, end + timedelta(microseconds=1))
+    c = monitor_run.window_alert_id(start + timedelta(microseconds=1), end)
+    assert len({a, b, c}) == 3
+    # the webhook accepts it as a file name
+    IncidentAlert(alert_id=a, window_start=start, window_end=end)
+
+
+def test_window_shorter_than_the_calibration_is_not_judged(fake_analyser):
+    alerts: list[IncidentAlert] = []
+    log = FakeLog(make_log_frame(5))
+    assert run(log, alerts.append, window_size=6) is None
+    assert alerts == []
+    assert fake_analyser.calls == []  # nothing analysed, so nothing to read an incident from
+
+    result = monitor_run.monitor_window(
+        log, object(), null_model(6), start=T0, end=T1, alert=alerts.append
+    )
+    assert (result.status, result.rows, result.min_rows, result.ranking) == (
+        "insufficient_rows",
+        5,
+        6,
+        None,
+    )
+
+
+def test_window_exactly_the_calibration_size_is_judged(fake_analyser):
+    alerts: list[IncidentAlert] = []
+    ranking = run(FakeLog(make_log_frame(5)), alerts.append, window_size=5)
+    assert ranking is not None and len(alerts) == 1
+
+
+def test_monitor_window_reports_empty_and_analysed(fake_analyser):
+    empty = pd.DataFrame(columns=[*FEATURE_COLS, "exposure", "p_default", "flag", "ts"])
+    result = monitor_run.monitor_window(
+        FakeLog(empty), object(), null_model(), start=T0, end=T1, alert=lambda a: None
+    )
+    assert (result.status, result.rows) == ("empty", 0)
+    result = monitor_run.monitor_window(
+        FakeLog(make_log_frame()), object(), null_model(), start=T0, end=T1, alert=lambda a: None
+    )
+    assert (result.status, result.rows) == ("analysed", 5)
+    assert result.ranking is not None
 
 
 def test_report_written_only_when_report_dir_given(fake_analyser, monkeypatch, tmp_path):

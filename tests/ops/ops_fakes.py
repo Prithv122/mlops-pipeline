@@ -81,8 +81,9 @@ class FakeLog:
 
 
 class FakeResponder:
-    def __init__(self, ranking: Ranking | None = None) -> None:
+    def __init__(self, ranking: Ranking | None = None, min_rows: int | None = None) -> None:
         self.ranking = ranking or make_ranking()
+        self.min_rows = min_rows  # like the CLI responder: windows shorter than this are not judged
         self.calls = 0
 
     def respond(self, window: pd.DataFrame):

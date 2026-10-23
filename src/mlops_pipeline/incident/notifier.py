@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TextIO
 
 from mlops_pipeline.contracts import Ranking
+from mlops_pipeline.incident.display import column_suspects
 
 if TYPE_CHECKING:
     from mlops_pipeline.incident.webhook import IncidentAlert
@@ -32,8 +33,13 @@ def alert_payload(
         "window_start": alert.window_start.isoformat(),
         "window_end": alert.window_end.isoformat(),
         "top": [
-            {"cause": h.cause, "column": h.column, "evidence": h.evidence}
-            for h in ranking.top_causes(TOP_CAUSES)
+            {
+                "cause": s.hypothesis.cause,
+                "column": s.hypothesis.column,
+                "evidence": s.hypothesis.evidence,
+                "column_score": s.column_score,
+            }
+            for s in column_suspects(ranking, TOP_CAUSES)
         ],
         "postmortem_path": postmortem_path,
     }
@@ -89,8 +95,9 @@ class SlackNotifier:
     ) -> dict[str, Any]:
         verdict = "incident confirmed" if ranking.incident else "no incident confirmed"
         causes = [
-            f"{i}. *{h.cause}* on `{h.column}` (evidence {h.evidence:.2f})"
-            for i, h in enumerate(ranking.top_causes(TOP_CAUSES), start=1)
+            f"{i}. *{s.hypothesis.cause}* on `{s.hypothesis.column}` "
+            f"(cause evidence {s.hypothesis.evidence:.2f}, column score {s.column_score:.2f})"
+            for i, s in enumerate(column_suspects(ranking, TOP_CAUSES), start=1)
         ]
         body = "\n".join(causes) if causes else "No hypotheses."
         context = f"Window {alert.window_start.isoformat()} to {alert.window_end.isoformat()}"

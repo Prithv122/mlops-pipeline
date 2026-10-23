@@ -6,8 +6,10 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -16,6 +18,87 @@ from mlops_pipeline.incident.collector import collect
 from mlops_pipeline.incident.webhook import IncidentAlert
 
 TIMEOUT_SECONDS = 10
+
+
+@dataclass(frozen=True)
+class MonitorResult:
+    """What one monitor pass found.
+
+    ``status`` is ``analysed`` (``ranking`` is set), ``empty`` (no rows) or
+    ``insufficient_rows`` (fewer than ``min_rows``, the window length the scores were
+    calibrated for). Only ``analysed`` carries a verdict.
+    """
+
+    status: Literal["analysed", "empty", "insufficient_rows"]
+    rows: int
+    min_rows: int
+    ranking: Ranking | None = None
+
+
+def window_alert_id(start: datetime, end: datetime) -> str:
+    """Alert id from the window in UTC with microseconds, so two windows never share one.
+
+    A naive time is read as UTC, as the webhook does. Only letters and digits, so it passes the
+    webhook's file-name check.
+    """
+
+    def stamp(value: datetime) -> str:
+        utc = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return f"{utc:%Y%m%dT%H%M%S%f}Z"
+
+    return f"drift-{stamp(start)}-{stamp(end)}"
+
+
+def monitor_window(
+    log: Any,
+    ref: Any,
+    null: Any,
+    *,
+    start: Any,
+    end: Any,
+    alert: Callable[[IncidentAlert], None],
+    report_dir: Path | None = None,
+    reference_frame: pd.DataFrame | None = None,
+) -> MonitorResult:
+    """Analyse ``log`` rows with ``start <= ts < end`` against the reference.
+
+    An empty window must not look like a quiet one, and neither must a short one: the scores
+    are calibrated for windows of ``null.window_size`` rows, and a much smaller window reads as
+    drift almost every time. In both cases nothing is analysed and ``alert`` is not called.
+    ``alert`` is called once, with an id derived from the window, only when the ranking says
+    incident, so re-running the same window repeats the same id and the webhook can ignore the
+    duplicate.
+
+    ``report_dir`` also writes the Evidently drift report for a human to read. That report needs
+    the reference as a frame, so pass ``reference_frame`` when ``ref`` is a profile that does not
+    carry one. The report feeds nothing else; the ranking is what decides.
+    """
+    # Imported here so a test can replace the analyser, and so a run without a report never
+    # loads Evidently.
+    from mlops_pipeline.incident.analyser import analyse
+
+    min_rows = int(null.window_size)
+    window = collect(log, start, end)
+    rows = len(window)
+    if rows == 0:
+        return MonitorResult("empty", 0, min_rows)
+    if rows < min_rows:
+        return MonitorResult("insufficient_rows", rows, min_rows)
+
+    _, ranking = analyse(ref, null, window)
+
+    if ranking.incident:
+        alert(
+            IncidentAlert(alert_id=window_alert_id(start, end), window_start=start, window_end=end)
+        )
+
+    if report_dir is not None:
+        from mlops_pipeline.monitor.evidently_report import write_drift_report
+
+        frame = reference_frame if reference_frame is not None else _reference_frame(ref)
+        write_drift_report(frame, window, report_dir)
+
+    return MonitorResult("analysed", rows, min_rows, ranking)
 
 
 def monitor_once(
@@ -29,43 +112,21 @@ def monitor_once(
     report_dir: Path | None = None,
     reference_frame: pd.DataFrame | None = None,
 ) -> Ranking | None:
-    """Analyse ``log`` rows with ``start <= ts < end`` against the reference.
+    """:func:`monitor_window`, returning only the ranking.
 
-    Returns the ranking, or ``None`` when the window holds no rows (nothing to compare, and an
-    empty window must not look like a quiet one). ``alert`` is called once, with an id derived from
-    the window, only when the ranking says incident, so re-running the same window repeats the
-    same id and the webhook can ignore the duplicate.
-
-    ``report_dir`` also writes the Evidently drift report for a human to read. That report needs
-    the reference as a frame, so pass ``reference_frame`` when ``ref`` is a profile that does not
-    carry one. The report feeds nothing else; the ranking above is what decides.
+    ``None`` means nothing was judged: the window was empty or shorter than the null model's
+    ``window_size``. Use :func:`monitor_window` to tell those apart.
     """
-    # Imported here so a test can replace the analyser, and so a run without a report never
-    # loads Evidently.
-    from mlops_pipeline.incident.analyser import analyse
-
-    window = collect(log, start, end)
-    if len(window) == 0:
-        return None
-
-    _, ranking = analyse(ref, null, window)
-
-    if ranking.incident:
-        alert(
-            IncidentAlert(
-                alert_id=f"drift-{start:%Y%m%dT%H%M%S}-{end:%Y%m%dT%H%M%S}",
-                window_start=start,
-                window_end=end,
-            )
-        )
-
-    if report_dir is not None:
-        from mlops_pipeline.monitor.evidently_report import write_drift_report
-
-        frame = reference_frame if reference_frame is not None else _reference_frame(ref)
-        write_drift_report(frame, window, report_dir)
-
-    return ranking
+    return monitor_window(
+        log,
+        ref,
+        null,
+        start=start,
+        end=end,
+        alert=alert,
+        report_dir=report_dir,
+        reference_frame=reference_frame,
+    ).ranking
 
 
 def _reference_frame(ref: Any) -> pd.DataFrame:
