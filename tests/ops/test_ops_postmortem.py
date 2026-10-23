@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
-from conftest import T0, T1
+from ops_fakes import T0, T1
 
 from mlops_pipeline.incident.postmortem import BLIND_SPOT, LLMWriter, TemplateWriter
 from mlops_pipeline.incident.webhook import IncidentAlert
@@ -23,7 +25,9 @@ def test_template_contains_top_cause_verdict_and_blind_spot(stats, ranking):
 def test_template_lists_five_hypotheses_and_three_columns(stats, ranking):
     text = TemplateWriter().write(ALERT, stats, ranking, 10)
     assert text.count("\n| ") >= 5
-    assert "| 5 | recode | EDUCATION |" in text
+    # one row per column: the second BILL_AMT1 hypothesis does not take a slot
+    assert "| 4 | recode | EDUCATION |" in text
+    assert "| 5 | covariate_shift | AGE |" in text
     assert "| 6 |" not in text
     # column order is BILL_AMT1, BILL_AMT2, PAY_1 -> raw signals for exactly those three
     for column in ("BILL_AMT1", "BILL_AMT2", "PAY_1"):
@@ -37,10 +41,9 @@ def test_template_is_deterministic(stats, ranking):
     assert writer.write(ALERT, stats, ranking, 10) == writer.write(ALERT, stats, ranking, 10)
 
 
-def test_template_reports_no_incident(stats):
-    from conftest import make_ranking
-
-    text = TemplateWriter().write(ALERT, stats, make_ranking(incident=False), 10)
+def test_template_reports_no_incident(stats, ranking):
+    quiet = dataclasses.replace(ranking, incident=False)
+    text = TemplateWriter().write(ALERT, stats, quiet, 10)
     assert "Verdict: no incident" in text
 
 

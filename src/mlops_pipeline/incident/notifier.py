@@ -33,7 +33,7 @@ def alert_payload(
         "window_end": alert.window_end.isoformat(),
         "top": [
             {"cause": h.cause, "column": h.column, "evidence": h.evidence}
-            for h in ranking.hypotheses[:TOP_CAUSES]
+            for h in ranking.top_causes(TOP_CAUSES)
         ],
         "postmortem_path": postmortem_path,
     }
@@ -90,7 +90,7 @@ class SlackNotifier:
         verdict = "incident confirmed" if ranking.incident else "no incident confirmed"
         causes = [
             f"{i}. *{h.cause}* on `{h.column}` (evidence {h.evidence:.2f})"
-            for i, h in enumerate(ranking.hypotheses[:TOP_CAUSES], start=1)
+            for i, h in enumerate(ranking.top_causes(TOP_CAUSES), start=1)
         ]
         body = "\n".join(causes) if causes else "No hypotheses."
         context = f"Window {alert.window_start.isoformat()} to {alert.window_end.isoformat()}"

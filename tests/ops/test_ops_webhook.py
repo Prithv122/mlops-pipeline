@@ -6,8 +6,8 @@ from pathlib import Path
 import httpx
 import pandas as pd
 import pytest
-from conftest import FakeNotifier
 from fastapi import FastAPI
+from ops_fakes import FakeNotifier
 
 from mlops_pipeline.incident.notifier import SlackNotifier
 from mlops_pipeline.incident.postmortem import BLIND_SPOT
@@ -48,7 +48,11 @@ def test_happy_path_writes_postmortem_and_notifies_once(make_state):
     assert data["alert_id"] == BODY["alert_id"]
     assert data["incident"] is True
     assert data["rows"] == 5
-    assert [t["column"] for t in data["top"]] == ["BILL_AMT1", "BILL_AMT1", "BILL_AMT2"]
+    assert [t["column"] for t in data["top"]] == [
+        "BILL_AMT1",
+        "BILL_AMT2",
+        "PAY_1",
+    ]  # one cause per column
     assert set(data["top"][0]) == {"cause", "column", "evidence"}
 
     path = Path(data["postmortem_path"])

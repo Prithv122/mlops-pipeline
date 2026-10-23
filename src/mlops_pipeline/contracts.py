@@ -95,3 +95,15 @@ class Ranking:
     @property
     def top(self) -> Hypothesis | None:
         return self.hypotheses[0] if self.hypotheses else None
+
+    def top_causes(self, k: int) -> list[Hypothesis]:
+        """The leading hypothesis of each of the first ``k`` columns: one cause per column."""
+        out: list[Hypothesis] = []
+        seen: set[str] = set()
+        for h in self.hypotheses:
+            if h.column not in seen:
+                seen.add(h.column)
+                out.append(h)
+                if len(out) == k:
+                    break
+        return out

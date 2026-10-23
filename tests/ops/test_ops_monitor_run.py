@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
-from conftest import T0, T1, FakeLog, make_all_stats, make_log_frame, make_ranking
+from ops_fakes import T0, T1, FakeLog, make_all_stats, make_log_frame, make_ranking
 
 from mlops_pipeline.incident.webhook import IncidentAlert
 from mlops_pipeline.model.data import FEATURE_COLS

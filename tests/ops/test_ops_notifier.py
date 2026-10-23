@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 
-from conftest import T0, T1, make_ranking
+from ops_fakes import T0, T1, make_ranking
 
 from mlops_pipeline.incident.notifier import JsonNotifier, SlackNotifier, alert_payload
 from mlops_pipeline.incident.webhook import IncidentAlert
@@ -21,7 +21,11 @@ def test_json_notifier_writes_one_parseable_line():
     parsed = json.loads(lines[0])
     assert parsed["alert_id"] == "drift-test-1"
     assert parsed["incident"] is True
-    assert [t["column"] for t in parsed["top"]] == ["BILL_AMT1", "BILL_AMT1", "BILL_AMT2"]
+    assert [t["column"] for t in parsed["top"]] == [
+        "BILL_AMT1",
+        "BILL_AMT2",
+        "PAY_1",
+    ]  # one cause per column
 
 
 def test_json_notifier_defaults_to_stdout(capsys):

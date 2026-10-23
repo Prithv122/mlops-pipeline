@@ -77,12 +77,12 @@ def measured_section(stats: dict[str, ColumnStats], ranking: Ranking) -> str:
         f"- Threshold: {_num(ranking.threshold)}",
         f"- Method: {ranking.method}",
         "",
-        f"## Top {TOP_HYPOTHESES} hypotheses",
+        f"## Top {TOP_HYPOTHESES} suspect columns (diagnosed cause of each)",
         "",
         "| # | Cause | Column | Evidence |",
         "|---|---|---|---|",
     ]
-    for i, h in enumerate(ranking.hypotheses[:TOP_HYPOTHESES], start=1):
+    for i, h in enumerate(ranking.top_causes(TOP_HYPOTHESES), start=1):
         lines.append(f"| {i} | {h.cause} | {h.column} | {_num(h.evidence)} |")
     if not ranking.hypotheses:
         lines.append("| - | none | none | - |")

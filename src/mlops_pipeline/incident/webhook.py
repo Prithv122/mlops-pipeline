@@ -140,7 +140,7 @@ def incident_webhook(alert: IncidentAlert, request: Request) -> IncidentResponse
             rows=len(window),
             top=[
                 TopCause(cause=h.cause, column=h.column, evidence=h.evidence)
-                for h in ranking.hypotheses[:TOP_CAUSES]
+                for h in ranking.top_causes(TOP_CAUSES)
             ],
             postmortem_path=str(path),
         )

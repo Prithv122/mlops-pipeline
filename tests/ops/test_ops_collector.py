@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from conftest import T0, T1, FakeLog, make_log_frame
+from ops_fakes import T0, T1, FakeLog, make_log_frame
 
 from mlops_pipeline.incident.collector import collect
 from mlops_pipeline.model.data import FEATURE_COLS
