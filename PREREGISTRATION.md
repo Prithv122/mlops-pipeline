@@ -123,4 +123,31 @@ model's README uses.
 
 ## Amendments
 
-_None yet._
+### Amendment 1 — 2026-10-23, before any evaluation seed was run: class diagnosis within a column
+
+**What was seen.** A development smoke (seeds 10,000–10,003, 48 fault windows, 40 controls)
+showed the literal rule labelling every severity-1 and severity-2 unit break, and every 100%
+null spike, as `covariate_shift`. PSI and KS rise under every fault and reach the 1,000 cap,
+so the shift hypothesis outscores (or ties, and wins the tie on class order) the specific
+signal. The approved brief requires "×1000 → unit break, not shift".
+
+**Change.** Only the order of hypotheses *inside* a column:
+
+1. Columns are ordered exactly as before: by their strongest hypothesis's evidence, ties by
+   `FEATURE_COLS` position. The column ranking, the incident verdict and τ are unchanged.
+2. Within a column, hypotheses with evidence ≥ τ come first, most specific class first:
+   `null_spike`, `unit_break`, `recode`, `covariate_shift`. Hypotheses below τ follow, by
+   evidence, ties by the same specificity order.
+3. `Ranking.hypotheses` is therefore grouped by column (column-rank order), not one global
+   sort by evidence. The maximum evidence is computed over all hypotheses.
+
+**Why this cannot move H1 or H2.** Column top-1, column MRR and both incident verdicts depend
+only on the column order and the maximum evidence, which item 1 leaves untouched. On the
+development smoke, `ranker_top1`, `ranker_rr`, `ranker_incident`, `ranker_top_column`,
+`ranker_max_evidence` and every baseline column were identical before and after. Only the
+secondary cause top-1 changes.
+
+**Cost seen on the same development seeds, kept, not tuned.** Large covariate shifts push some
+AGE or LIMIT_BAL values beyond the reference range, so out-of-range crosses τ and 3 of the 8
+severity-1/2 shift windows are now labelled `unit_break`. Before the change, 8 of 8 unit
+breaks at severity 1–2 and 4 of 4 full null spikes were mislabelled; after it, 0 of each.

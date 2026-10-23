@@ -68,7 +68,14 @@ _EVIDENCE_SIGNALS: dict[FaultClass, tuple[str, ...]] = {
 }
 
 _COLUMN_POSITION = {c: i for i, c in enumerate(FEATURE_COLS)}
-_CLASS_POSITION = {c: i for i, c in enumerate(FAULT_CLASSES)}
+#: Most specific explanation first (Amendment 1); covariate shift is the residual one.
+_SPECIFICITY: dict[FaultClass, int] = {
+    "null_spike": 0,
+    "unit_break": 1,
+    "recode": 2,
+    "covariate_shift": 3,
+}
+assert set(_SPECIFICITY) == set(FAULT_CLASSES)
 
 
 @dataclass(frozen=True)
@@ -129,24 +136,51 @@ def robust_z(null: NullModel, stats: Mapping[str, ColumnStats]) -> dict[tuple[st
     return out
 
 
+def _diagnosis_key(h: Hypothesis, tau: float) -> tuple[int, float, int]:
+    """Order of the hypotheses within one column (Amendment 1).
+
+    Hypotheses at or above tau come first, most specific class first; the rest follow by
+    evidence. Null-rate and out-of-range shares sit near zero when nothing is wrong, so one
+    crossing tau is specific; PSI and KS rise under every fault, which makes a shift the
+    explanation of last resort rather than the default winner of a capped score.
+    """
+    if h.evidence >= tau:
+        return (0, 0.0, _SPECIFICITY[h.cause])
+    return (1, -h.evidence, _SPECIFICITY[h.cause])
+
+
 def _hypotheses(
-    z: Mapping[tuple[str, str], float], columns: Sequence[str]
+    z: Mapping[tuple[str, str], float], columns: Sequence[str], tau: float
 ) -> tuple[Hypothesis, ...]:
-    found: list[Hypothesis] = []
+    by_column: dict[str, list[Hypothesis]] = {}
     for column in columns:
         for cause in hypotheses_for(column):
             used = {s: z[(s, column)] for s in _EVIDENCE_SIGNALS[cause]}
-            found.append(Hypothesis(cause, column, max(used.values()), used))
-    # Highest evidence first; ties by FEATURE_COLS position, then by class order.
-    found.sort(key=lambda h: (-h.evidence, _COLUMN_POSITION[h.column], _CLASS_POSITION[h.cause]))
-    return tuple(found)
+            by_column.setdefault(column, []).append(
+                Hypothesis(cause, column, max(used.values()), used)
+            )
+    # Columns by their strongest hypothesis, ties by FEATURE_COLS position (unchanged by
+    # Amendment 1); within a column, the diagnosis order above.
+    ordered = sorted(
+        by_column,
+        key=lambda c: (-max(h.evidence for h in by_column[c]), _COLUMN_POSITION[c]),
+    )
+    return tuple(
+        h
+        for column in ordered
+        for h in sorted(by_column[column], key=lambda h: _diagnosis_key(h, tau))
+    )
 
 
 def rank(null: NullModel, stats: Mapping[str, ColumnStats]) -> Ranking:
     """Rank every applicable (fault class, column) pair; incident iff max evidence >= tau."""
-    hypotheses = _hypotheses(robust_z(null, stats), list(stats))
-    incident = bool(hypotheses) and hypotheses[0].evidence >= null.tau
+    hypotheses = _hypotheses(robust_z(null, stats), list(stats), null.tau)
+    incident = bool(hypotheses) and _max_evidence(hypotheses) >= null.tau
     return Ranking("ranker", hypotheses, incident, null.tau)
+
+
+def _max_evidence(hypotheses: Sequence[Hypothesis]) -> float:
+    return max(h.evidence for h in hypotheses)
 
 
 def psi_baseline(stats: Mapping[str, ColumnStats]) -> Ranking:
@@ -200,7 +234,7 @@ def fit_null_model_from_stats(
             values = np.array([getattr(w[column], signal) for w in first], dtype=float)
             medians[(signal, column)], scales[(signal, column)] = _median_and_scale(values)
     provisional = NullModel(medians, scales, tau=math.inf)
-    max_evidences = [rank(provisional, w).hypotheses[0].evidence for w in second]
+    max_evidences = [_max_evidence(rank(provisional, w).hypotheses) for w in second]
     tau = float(np.percentile(max_evidences, TAU_PERCENTILE))
     return dataclasses.replace(provisional, tau=tau)
 

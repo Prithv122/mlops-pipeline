@@ -227,4 +227,14 @@ baseline_top1, baseline_rr, baseline_incident, baseline_top_column, baseline_max
 
 ## Amendments
 
-_None yet._
+- **2026-10-23 (A1).** `Ranking.hypotheses` is grouped by column: columns ordered by their
+  strongest hypothesis, and inside a column the diagnosis order of PREREGISTRATION.md
+  Amendment 1. `Ranking.top` is therefore the diagnosed cause of the top column, not always
+  the single highest evidence. Code that needs the maximum evidence takes it over all
+  hypotheses.
+- **2026-10-23.** Additions made while building, none changing a listed signature:
+  `create_app(..., extra_routers=())`; app state keys `settings`, `predlog`, `responder`,
+  `notifier`, `postmortem_writer`; a custom 422 handler that returns only `loc`, `msg`,
+  `type`; `retrain(..., data_path="")`; `train.score_model`; `evaluate.fit_responder` and
+  `window_size`/`progress` keywords; `monitor_once(..., reference_frame=None)` for the
+  Evidently report; a `prepare` CLI command (writes the split for the DVC pipeline).

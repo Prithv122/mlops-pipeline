@@ -176,13 +176,13 @@ def test_hypothesis_signals_hold_the_z_scores_used() -> None:
 # ----------------------------------------------------------------- ties
 
 
-def test_all_zero_evidence_orders_by_column_position_then_class() -> None:
+def test_all_zero_evidence_orders_by_column_position_then_specificity() -> None:
     ranking = rank(unit_null(), window())
     first_three = [(h.column, h.cause) for h in ranking.hypotheses[:3]]
     assert first_three == [
-        ("LIMIT_BAL", "covariate_shift"),
-        ("LIMIT_BAL", "unit_break"),
         ("LIMIT_BAL", "null_spike"),
+        ("LIMIT_BAL", "unit_break"),
+        ("LIMIT_BAL", "covariate_shift"),
     ]
     last = ranking.hypotheses[-1]
     assert (last.column, last.cause) == ("MARRIAGE", "recode")
@@ -192,16 +192,45 @@ def test_ties_break_by_column_position_before_class() -> None:
     # PAY_1 covariate_shift and AGE null_spike both score 1.0: AGE comes first in FEATURE_COLS.
     w = window(PAY_1={"ks": 1.0}, AGE={"null_delta": 1.0})
     ranking = rank(unit_null(), w)
-    assert [(h.column, h.cause) for h in ranking.hypotheses[:2]] == [
-        ("AGE", "null_spike"),
-        ("PAY_1", "covariate_shift"),
-    ]
+    assert ranking.column_order()[:2] == ["AGE", "PAY_1"]
+    assert ranking.top is not None
+    assert (ranking.top.column, ranking.top.cause) == ("AGE", "null_spike")
 
 
-def test_ties_on_the_same_column_break_by_class_order() -> None:
+def test_ties_on_the_same_column_break_by_specificity() -> None:
     w = window(LIMIT_BAL={"ks": 2.0, "out_of_range": 2.0, "null_delta": 2.0})
     top3 = rank(unit_null(), w).hypotheses[:3]
-    assert [h.cause for h in top3] == ["covariate_shift", "unit_break", "null_spike"]
+    assert [h.cause for h in top3] == ["null_spike", "unit_break", "covariate_shift"]
+
+
+# ------------------------------------------------- Amendment 1: diagnosis
+
+
+def test_specific_class_above_tau_beats_a_larger_capped_shift_score() -> None:
+    # A x1000 unit break: PSI saturates, out-of-range share is large but smaller in z.
+    w = window(BILL_AMT1={"psi": 1000.0, "ks": 900.0, "out_of_range": 22.0})
+    ranking = rank(unit_null(tau=10.0), w)
+    assert ranking.top is not None
+    assert (ranking.top.column, ranking.top.cause) == ("BILL_AMT1", "unit_break")
+    assert ranking.incident
+
+
+def test_below_tau_the_column_hypotheses_order_by_evidence() -> None:
+    w = window(AGE={"ks": 5.0, "out_of_range": 2.0})
+    ranking = rank(unit_null(tau=10.0), w)
+    assert [h.cause for h in ranking.hypotheses[:2]] == ["covariate_shift", "unit_break"]
+    assert not ranking.incident
+
+
+def test_column_order_follows_each_columns_strongest_hypothesis() -> None:
+    # The diagnosis reorders hypotheses inside a column, never the columns themselves.
+    w = window(AGE={"ks": 50.0, "out_of_range": 12.0}, PAY_4={"null_delta": 40.0})
+    ranking = rank(unit_null(tau=10.0), w)
+    assert ranking.column_order()[:2] == ["AGE", "PAY_4"]
+    assert [(h.column, h.cause) for h in ranking.hypotheses[:2]] == [
+        ("AGE", "unit_break"),
+        ("AGE", "covariate_shift"),
+    ]
 
 
 def test_higher_evidence_beats_earlier_position() -> None:

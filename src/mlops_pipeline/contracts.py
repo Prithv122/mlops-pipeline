@@ -73,7 +73,12 @@ class Hypothesis:
 
 @dataclass(frozen=True)
 class Ranking:
-    """A responder's answer for one window: hypotheses sorted by evidence, highest first."""
+    """A responder's answer for one window.
+
+    Hypotheses are grouped by column, columns ordered by their strongest evidence; within a
+    column the ranker puts its diagnosis first (DESIGN.md amendment A1). The PSI baseline has
+    one hypothesis per column, so for it this is simply PSI order.
+    """
 
     method: Literal["ranker", "psi_baseline"]
     hypotheses: tuple[Hypothesis, ...]
