@@ -2,32 +2,63 @@
 
 **Five questions, five answers.** An unanswered question means this project is not shipped.
 
-If you can't answer one, you don't understand that part of your own project yet — go back and understand it. This file is the difference between a portfolio that survives a technical screen and one that collapses in it.
-
 ---
 
 ### Q1. Walk me through the architecture in 90 seconds.
 
-_A:_
+_A:_ The credit-default model from my earlier project is vendored in at a pinned commit:
+LightGBM with native categoricals, isotonic calibration on a validation split, and an
+expected-cost flag. `train` fits it, logs params and metrics to MLflow on a local SQLite
+backend, registers a version and moves the `champion` alias. FastAPI loads the champion at
+startup and serves `/predict`, which returns the calibrated probability, the cost flag and the
+model version, and writes every request to a SQLite prediction log. A `monitor` job compares a
+window of that log with the training data: eight statistics per column (PSI, KS, null-rate
+change, out-of-range share and so on). If the responder says incident, it posts an alert to
+`/incident/webhook`, which collects the same window, ranks causes, writes a markdown
+postmortem and notifies (JSON line or Slack). `retrain` trains a challenger and only moves the
+alias if it is no worse than the champion on the same test split. DVC wires
+prepare → train → smoke evaluation, and a manual GitHub workflow runs retraining.
 
-### Q2. Why did you choose ___ over ___?
+### Q2. Why vendor the model code instead of installing your other repo as a dependency?
 
-_A:_
+_A:_ Two reasons. A git-SHA dependency breaks if that repo's history is ever rewritten, and I
+have rewritten histories in this portfolio before. And the reader of this repo should see the
+model it serves without opening a second project. Vendoring has a cost: drift between copies.
+I paid for that with a record in NOTES.md of each file's origin path and `git hash-object`, a
+header in each file, and a rule that their logic never changes here. I also checked it by
+result: `train` on the full data reproduces the source project's test AUC 0.7750, Brier 0.1339
+and ECE 0.0237 exactly.
 
-### Q3. What's the weakest part of this, and what would break first under load?
+### Q3. How do you know the cause ranker is any good? Couldn't you just tune it until it wins?
 
-_A:_
+_A:_ That is exactly the risk, so the evaluation was written down and committed before any
+ranker code existed: the fault classes, severities, seeds, window size, scoring maths, the
+baseline, the metric and the pass rule (ranker beats "largest PSI" by at least 0.15 in column
+top-1, with a paired bootstrap interval above zero, and no more than 5% false incidents on
+no-fault windows). Development used separate seeds starting at 10,000; the evaluation seeds run
+once, from a clean commit, and the CLI refuses to run them twice or on the wrong data. I made
+two amendments before that run, both dated and both from development seeds. The first fixed
+the fault-class diagnosis; I showed the column results were byte-identical before and after, so
+it could not move the headline. The second recorded the development-seed H1 numbers I had
+already seen, which were below the bar, and added one exploratory arm. That arm is reported
+separately and never decides the verdict. The primary metric compares columns, not causes,
+because the PSI baseline never names a fault type. Comparing causes would hand the ranker a
+free win.
 
-### Q4. How do you know it works? What did you measure, and against what baseline?
+### Q4. What was the most interesting thing that went wrong?
 
-_A:_
+_A:_ Two things, both about medians. First, my ranker labelled every big ×1000 unit break as
+"covariate shift". PSI and KS rise under every fault and hit the score cap, so the generic
+explanation won by default. The fix was to diagnose inside a column by specificity: if the
+null rate or the out-of-range share crosses the incident line, that names the fault, because
+those signals sit near zero when nothing is wrong. Second, I wrote down the wrong reason for a
+side effect of that fix, and an independent review caught it. I claimed shifts were being
+labelled unit breaks through out-of-range values. They measured those at zero. The real cause
+is that LIMIT_BAL lives on a 10,000 grid: its median is the same value in most no-fault windows,
+so its MAD is zero and the score scale falls to the floor. One grid step then scores like a
+broken feed. The same heaping sets the incident threshold. The lesson I took: measure the
+mechanism before you write it down, and robust statistics are not robust to discrete data.
 
-### Q5. _<hardest technical question specific to this project — the one you'd least want to be asked>_
+### Q5. What did the evaluation show, and what would you do next?
 
-_A:_
-
----
-
-## 30-second pitch
-
-_Problem → what you built → measured outcome. Say it out loud until it's fluent._
+_A:_ _Answered from `results/eval/REPORT.md` after the one-time run._
