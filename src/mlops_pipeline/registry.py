@@ -89,6 +89,10 @@ def _store_dir(tracking_uri: str) -> Path | None:
 
 
 def _client(tracking_uri: str) -> MlflowClient:
+    store = _store_dir(tracking_uri)
+    if store is not None:
+        # SQLite creates the file but not its folder; a fresh clone has no mlstore/ yet.
+        store.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_registry_uri(tracking_uri)
     return MlflowClient(tracking_uri=tracking_uri, registry_uri=tracking_uri)

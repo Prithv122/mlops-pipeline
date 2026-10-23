@@ -17,7 +17,7 @@ from pathlib import Path
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 DEFAULT_DATA = "data/credit_default.csv.gz"
-DEFAULT_TRACKING = "sqlite:///mlflow.db"
+DEFAULT_TRACKING = "sqlite:///mlstore/mlflow.db"
 
 
 def _read(path: str):

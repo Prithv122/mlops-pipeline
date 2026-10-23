@@ -189,3 +189,11 @@ def test_promotion_margins_are_exact(
     assert not decide()
     monkeypatch.setattr(registry, "_score_champion", champion(0.0, 0.0025))
     assert not decide()
+
+
+def test_a_missing_store_folder_is_created(tmp_path) -> None:
+    from mlops_pipeline.registry import _client
+
+    db = tmp_path / "not-yet" / "mlflow.db"
+    _client(f"sqlite:///{db.as_posix()}")
+    assert db.parent.is_dir()

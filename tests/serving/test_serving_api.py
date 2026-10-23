@@ -170,9 +170,9 @@ async def test_extra_routers_and_responder_are_wired(tmp_path: Path, loaded: Loa
 
 
 def test_settings_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    s = Settings()
+    s = Settings(_env_file=None)  # a developer's own .env must not change the defaults
     assert (s.tracking_uri, s.model_name, s.model_alias) == (
-        "sqlite:///mlflow.db",
+        "sqlite:///mlstore/mlflow.db",
         "credit-default",
         "champion",
     )
@@ -180,7 +180,7 @@ def test_settings_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MLOPS_MODEL_ALIAS", "challenger")
     monkeypatch.setenv("MLOPS_TRACKING_URI", "sqlite:////app/mlstore/mlflow.db")
     monkeypatch.setenv("MLOPS_SLACK_WEBHOOK_URL", "https://hooks.example.test/x")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.model_alias == "challenger"
     assert s.tracking_uri == "sqlite:////app/mlstore/mlflow.db"
     assert s.slack_webhook_url == "https://hooks.example.test/x"
@@ -213,3 +213,11 @@ def test_startup_fails_without_a_champion(tmp_path: Path) -> None:
     app = create_app(Settings(tracking_uri=uri, predlog_path=str(tmp_path / "pred.sqlite")))
     with pytest.raises(LookupError), TestClient(app):
         pass
+
+
+def test_blank_values_in_a_copied_env_file_keep_the_defaults(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("MLOPS_TRACKING_URI=\nMLOPS_MODEL_ALIAS=challenger\n", encoding="utf-8")
+    s = Settings(_env_file=env)
+    assert s.tracking_uri == "sqlite:///mlstore/mlflow.db"
+    assert s.model_alias == "challenger"
