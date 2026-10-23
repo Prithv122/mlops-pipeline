@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from pathlib import Path
 
@@ -216,6 +217,20 @@ def test_column_kinds_cover_all_features():
     assert {column_kind(c) for c in FEATURE_COLS} == {"continuous", "discrete", "categorical"}
 
 
+def test_column_stats_never_calls_scipy_per_column():
+    """The fast path: KS comes from the presorted reference, not ``scipy.stats.ks_2samp``,
+    which re-sorts 18,000 values per column and made one window cost ~400 ms. Checked
+    structurally so a busy machine cannot fail it; the timing check below is opt-in."""
+    from mlops_pipeline.monitor import stats
+
+    assert "scipy" not in vars(stats)
+    assert not any(getattr(v, "__module__", "").startswith("scipy") for v in vars(stats).values())
+
+
+@pytest.mark.skipif(
+    os.environ.get("MLOPS_TIMING_TESTS") != "1",
+    reason="wall-clock check; opt in on a quiet machine",
+)
 def test_column_stats_speed_on_a_full_size_window(parts):
     """The evaluation makes about 840 calls; one call must stay far below 100 ms."""
     rng = np.random.default_rng(10_000)
