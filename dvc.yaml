@@ -1,0 +1,43 @@
+# Pipeline stages. `dvc repro` re-runs a stage only when its dependencies change.
+# The commands are the same ones documented in the README, so DVC adds caching and a dependency
+# graph, not a second way to run things.
+stages:
+  prepare:
+    cmd: mlops-pipeline prepare --data data/credit_default.csv.gz --out data/processed
+    deps:
+      - data/credit_default.csv.gz
+      - src/mlops_pipeline/model/data.py
+    outs:
+      - data/processed
+
+  train:
+    cmd: mlops-pipeline train --data data/credit_default.csv.gz --tracking-uri sqlite:///mlstore/mlflow.db
+    deps:
+      - data/credit_default.csv.gz
+      - src/mlops_pipeline/train.py
+      - src/mlops_pipeline/registry.py
+      - src/mlops_pipeline/model/calibration.py
+      - src/mlops_pipeline/model/costs.py
+      - src/mlops_pipeline/model/data.py
+      - src/mlops_pipeline/model/model.py
+    outs:
+      # The MLflow registry is the source of truth for models and is appended to by every
+      # train and retrain, including runs outside DVC. Caching it would copy a live SQLite file
+      # and fight those writers, so DVC tracks it as a stage output but does not cache it.
+      - mlstore:
+          cache: false
+    metrics:
+      - metrics/train.json:
+          cache: false
+
+  eval_responder_smoke:
+    cmd: mlops-pipeline eval-responder --smoke --data data/credit_default.csv.gz --out results/smoke
+    deps:
+      - data/credit_default.csv.gz
+      - src/mlops_pipeline/evaluate.py
+      - src/mlops_pipeline/incident/faults.py
+      - src/mlops_pipeline/incident/ranker.py
+      - src/mlops_pipeline/incident/analyser.py
+      - src/mlops_pipeline/monitor/stats.py
+    outs:
+      - results/smoke

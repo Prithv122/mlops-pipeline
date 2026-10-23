@@ -1,0 +1,36 @@
+name: Retrain
+
+# Manual only. Trains a challenger, applies the promotion rule against the current champion,
+# and publishes the resulting registry as a build artifact. It deploys nothing and needs no secrets.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Retrain
+        run: uv run mlops-pipeline retrain --data data/credit_default.csv.gz --tracking-uri sqlite:///mlstore/mlflow.db
+
+      - name: Upload registry
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlstore
+          path: mlstore/
+          if-no-files-found: error

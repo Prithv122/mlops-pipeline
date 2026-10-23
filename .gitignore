@@ -44,3 +44,13 @@ mlruns/
 Thumbs.db
 .vscode/
 .idea/
+
+# Pipeline outputs and local state (mlflow.db and data/processed/ are covered above)
+mlstore/
+mlartifacts/
+predlog.sqlite
+postmortems/
+results/smoke/
+metrics/
+/.dvc/tmp
+/.dvc/cache

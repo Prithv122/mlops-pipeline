@@ -30,3 +30,6 @@ jobs:
 
       - name: Test
         run: uv run pytest --cov=src --cov-report=term-missing
+
+      - name: Responder smoke evaluation
+        run: uv run mlops-pipeline eval-responder --smoke --data tests/fixtures/credit_sample.csv.gz --out /tmp/smoke
