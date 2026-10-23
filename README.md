@@ -82,11 +82,60 @@ flowchart LR
 
 ## 5. Results
 
-_Filled from the one-time evaluation run (`results/eval/REPORT.md`); nothing here is
-interpreted before that report exists._
-
 **Model (from `train`, test fold of 6,000 rows):** AUC 0.7750 · Brier 0.1339 · ECE 0.0237,
 identical to the source project's published numbers, which checks the vendoring.
+
+**Responder: one pre-registered run.** 240 fault windows (4 classes × 3 severities × 20 seeds)
+and 200 no-fault windows of 1,000 rows each, drawn from the held-out split. Run once, from a clean
+commit (`4d503e3`), on 2026-10-23. Full tables, per-class and per-severity, are in
+[`results/eval/REPORT.md`](results/eval/REPORT.md).
+
+| Pre-registered test | Rule | Result | Verdict |
+|---|---|---|---|
+| **H1**: does the ranker find the broken column more often than "largest PSI"? | gain ≥ 0.15 **and** 95% interval above 0 | 0.792 vs 0.742, gain **+0.050** (0.008 to 0.092) | **Fail** |
+| **H2**: false incidents on no-fault windows | ≤ 5% | **1 of 200** (0.5%; Wilson 0.1% to 2.8%) | **Pass** |
+
+H1 fails: the ranker is better than the baseline, but by a third of the pre-registered margin.
+
+| Metric (240 fault windows) | Ranker | PSI baseline | Note |
+|---|---|---|---|
+| Column top-1 (primary) | 0.792 | 0.742 | scored identically |
+| Column MRR | 0.825 | 0.770 | |
+| Names the fault type correctly | **0.729** | 0.242 | baseline can only ever say "shift" |
+| Raises an incident (detection) | **0.579** | 0.371 | both at ≤ 0.5% false incidents |
+| False incidents, 200 controls | 1 (0.5%) | 0 (0%) | |
+
+**Where the difference comes from.** 18 of the ranker's 19 wins are 5% null spikes. PSI cannot
+see them: the nulls fall out of every bin and the score barely moves, so the baseline found the
+column in 0 of 20 such windows and the ranker in 18. All 7 of its losses are the same mechanism:
+a spurious `unit_break` on a column whose median sits on a coarse grid (LIMIT_BAL, PAY_AMT4/6,
+BILL_AMT2). The one false incident on a control window is the same thing again (PAY_AMT4). This
+weakness was found during development and written into the protocol before the run (Amendment 2,
+"heaped medians"). Severity 1 and 2 faults are found by both methods almost every time (ranker
+0.762 / 0.988, baseline 0.750 / 1.000). The comparison is decided by the subtle faults.
+
+**Naming the fault, by class:** null spike 0.967, unit break 0.967, shift 0.650, recode 0.333. Shift
+diagnosis splits by column. AGE shifts are named correctly from severity 1 up. LIMIT_BAL shifts
+are right at severity 0 but only half the time at severity 1 and never at severity 2: the median
+moves a grid step and reads as a broken feed. **Recodes** (EDUCATION codes 1↔2 swapped on some
+rows) are invisible to both methods until every row is affected, as the protocol predicted.
+
+**Exploratory ablation S1, declared before the run, not a hypothesis test.** The same ranker
+without the grid-sensitive `median_log_ratio` signal: column top-1 0.833 (+0.092 vs baseline,
+0.058 to 0.129), fault type named 0.829, detection 0.808, false incidents 2 of 200. That one signal
+causes most of the misdiagnoses. Even without it, the gain stays below the 0.15 bar, and the frozen
+ranker's verdict stands either way. S1 was named after development results had been seen, so it is
+reported as a failure mode the experiment found, not as a replacement result.
+
+**What to take from it.** On column-finding alone, a cause ranker adds little over "largest PSI"
+when faults are large; its value is in the subtle faults PSI misses (nulls) and in **naming the
+kind of fault** (0.73 against a baseline that can only say "shift"), which is what decides between
+retraining and fixing a feed. Robust z-scores need care on discrete or heaped columns: a MAD of
+zero turns one grid step into an incident.
+
+**Limits.** Windows are random draws, not time slices; one dataset; one fault per window; faults
+are synthetic with known causes; label-dependent faults (default-rate shift, concept drift) are
+out of scope because labels arrive late in credit.
 
 ## 6. How to run
 
@@ -130,7 +179,24 @@ Other commands:
 
 ## 7. What I'd change at 100× scale
 
-_To be written with the results._
+- **Calibration per column type, not one floor.** The first fix is the one the results point at:
+  give discrete or heaped columns a signal that respects their grid (a count of grid steps, or a
+  chi-square on the code frequencies) instead of a robust z with a 0.01 floor. That is a new
+  pre-registered study, not a patch to this one.
+- **Prediction log.** One SQLite file with a row per request stops at a few hundred writes a
+  second and one host. At 100× it becomes an append-only event stream (Kafka or Kinesis) landing
+  in partitioned Parquet, and the monitor reads windows from the lake on a schedule.
+- **Monitoring cost.** Eight statistics × 23 columns per window is trivial here; at thousands of
+  features, the responder would screen with cheap signals (null rate, range, counts per code) and
+  compute KS and PSI only on the columns that move.
+- **Windows in time.** Real windows should be time slices with a minimum row count per slice.
+  They also need a no-fault calibration that is refreshed as the population changes, so seasonal
+  drift does not page anyone.
+- **Registry and serving.** MLflow on SQLite becomes an MLflow server on Postgres with an object
+  store for artifacts. The API runs behind a load balancer with the model loaded per replica, and
+  promotion moves the alias after a shadow or canary period instead of an offline comparison only.
+- **Labels.** Join late-arriving default labels back to the log to watch performance, not just
+  inputs. That covers the blind spot this responder admits.
 
 ---
 

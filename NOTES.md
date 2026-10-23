@@ -86,3 +86,19 @@ the target (seed 20260923, default rate 0.2213 vs 0.2212 in the full data), buil
   2: the frozen ranker is primary, S1 is exploratory only). The one-time evaluation runs from
   the commit that adds this entry, which changes nothing but this file:
   `uv run mlops-pipeline eval-responder --full --out results/eval`.
+
+## The run
+
+- **2026-10-23, `4d503e3`, 40 s.** H1 fail (+0.050, 0.008 to 0.092), H2 pass (1/200). Results
+  committed as produced (`5fe047d`) before any write-up. Checked after the run, not before:
+  18 of 19 ranker wins are severity-0 null spikes; all 7 losses and the one control false alarm
+  are a spurious `unit_break` on a heaped-median column (LIMIT_BAL, PAY_AMT4/6, BILL_AMT2), the
+  limitation Amendment 2 named. LIMIT_BAL shift diagnosis 1.0 / 0.5 / 0.0 by severity, as the
+  erratum predicted. S1 (declared ablation): +0.092, still under the bar, so it would not have
+  changed the verdict even if it had been allowed to.
+- **Local CI replay #2 on the run commit `4d503e3`** (hosted Actions still unavailable): fresh
+  clone, fresh `uv sync --all-groups --frozen`; ruff check and format clean; pytest 248 passed,
+  1 skipped (the opt-in timing check), 91% coverage; fixture smoke wrote 34 records; `dvc dag`
+  lists the three stages. Then the README steps in that clone with no `.env`: `train` registered
+  version 1 (test AUC 0.7750), `serve` answered `/health`, `/model` and the webhook (`empty` for
+  a window with no traffic). Same differences from the hosted runner as replay #1.

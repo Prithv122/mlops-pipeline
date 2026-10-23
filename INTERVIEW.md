@@ -61,4 +61,17 @@ mechanism before you write it down, and robust statistics are not robust to disc
 
 ### Q5. What did the evaluation show, and what would you do next?
 
-_A:_ _Answered from `results/eval/REPORT.md` after the one-time run._
+_A:_ The pre-registered test failed, and I report it as a failure. On 240 injected faults the
+ranker found the broken column 79.2% of the time against 74.2% for "largest PSI". That gain of
++0.050 has a 95% interval of 0.008 to 0.092, so it is real but a third of the 0.15 bar I set in
+advance. The false-incident test passed: 1 of 200 clean windows. Where it did help is specific.
+PSI is blind to a 5% null spike, because nulls fall out of every bin; the baseline found 0 of 20
+and the ranker 18. It names the kind of fault correctly 73% of the time, and that is what tells
+you whether to retrain or to fix a feed. All seven of its losses, and its one false alarm, came
+from the heaped-median signal I had flagged before the run. Dropping that one signal, as an
+exploratory ablation declared in advance, gives +0.092 column top-1 and 83% correct fault types.
+I did not promote it, because I chose it after seeing development results. Next I would replace
+the robust z on discrete columns with something that respects the grid, such as counting grid
+steps or a chi-square on code frequencies, and pre-register that as a new study. Then I'd move
+from random windows to time slices with late labels joined back, so the responder can see
+performance as well as inputs.

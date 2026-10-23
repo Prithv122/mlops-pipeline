@@ -24,11 +24,11 @@ report) · DVC pipeline · pytest + ruff · Docker.
 
 ## Acceptance criteria
 
-- [ ] `/predict` serves the registered champion; every call lands in the prediction log
-- [ ] Retrain registers a challenger and promotes it only by the documented rule
-- [ ] Responder evaluated once on the frozen grid; H1 and H2 verdicts reported as they came out
-- [ ] Runs from a clean clone using only the documented steps
-- [ ] Tests, lint and CI green; README results come from real runs
+- [x] `/predict` serves the registered champion; every call lands in the prediction log
+- [x] Retrain registers a challenger and promotes it only by the documented rule
+- [x] Responder evaluated once on the frozen grid; H1 and H2 verdicts reported as they came out
+- [x] Runs from a clean clone using only the documented steps
+- [x] Tests, lint and CI green; README results come from real runs
 
 ## Conventions
 
