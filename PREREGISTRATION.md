@@ -183,6 +183,12 @@ same way on the same calibration windows. Its column top-1, cause top-1, detecti
 false-incident rate and paired difference against the baseline are reported in a separate,
 labelled section. **S1 never decides H1 or H2**, and it is reported whatever it shows.
 
+**Owner decision, 2026-10-23, before the run.** The frozen ranker stays the primary method and
+alone decides H1 and H2. S1 is an exploratory ablation. If the primary fails H1, S1 does not
+rescue it, whatever S1 shows. If S1 clearly beats the frozen ranker, that is reported as a
+failure mode the experiment found in the ranking design. It is not a replacement result, because
+S1 was named after development outcomes had been seen.
+
 **Run guard.** `eval-responder --full` refuses to run unless the window size is 1,000, the data
 file's SHA-256 is the vendored cache's, the tree is clean, and the output folder has no earlier
 `records.csv`. The report prints the commit, data hash and library versions.
