@@ -79,3 +79,10 @@ the target (seed 20260923, default rate 0.2213 vs 0.2212 in the full data), buil
 ## Open questions
 
 - [ ]
+
+## Freeze
+
+- **2026-10-23. Code and protocol frozen at `6362d6f`** (owner decision recorded in Amendment
+  2: the frozen ranker is primary, S1 is exploratory only). The one-time evaluation runs from
+  the commit that adds this entry, which changes nothing but this file:
+  `uv run mlops-pipeline eval-responder --full --out results/eval`.
