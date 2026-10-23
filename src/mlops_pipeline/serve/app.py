@@ -10,6 +10,8 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from mlops_pipeline.incident.notifier import JsonNotifier, SlackNotifier
+from mlops_pipeline.incident.webhook import router as incident_router
 from mlops_pipeline.predlog import PredictionLog
 from mlops_pipeline.registry import LoadedModel, load_model
 from mlops_pipeline.serve.routes import router
@@ -47,6 +49,10 @@ def create_app(
     app.state.model = model
     app.state.responder = responder
     app.state.predlog = PredictionLog(settings.predlog_path)
+    # Slack when a webhook URL is configured, otherwise one JSON line per alert on stdout.
+    app.state.notifier = (
+        SlackNotifier(settings.slack_webhook_url) if settings.slack_webhook_url else JsonNotifier()
+    )
 
     @app.exception_handler(RequestValidationError)
     async def _reject(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -56,6 +62,8 @@ def create_app(
         return JSONResponse(status_code=422, content={"detail": detail})
 
     app.include_router(router)
+    # The webhook answers 503 until a responder is attached, so it is always safe to mount.
+    app.include_router(incident_router)
     for extra in extra_routers:
         app.include_router(extra)
     return app
