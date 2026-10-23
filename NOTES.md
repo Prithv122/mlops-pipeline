@@ -29,6 +29,36 @@ the target (seed 20260923, default rate 0.2213 vs 0.2212 in the full data), buil
 
 ## Log
 
+### 2026-10-23 — build day
+- **Order of work.** Contracts (`DESIGN.md`, `contracts.py`) and `PREREGISTRATION.md` were
+  committed before any module (`37e9524`). Four parts were then built in parallel against them
+  (serving + registry, statistics + faults, ranker + evaluation, incident ops layer), each with
+  its own tests, and integrated with an end-to-end test.
+- **Vendoring checked by result.** Training the vendored model on the full cache through this
+  repo's `train` command gives test AUC 0.7750, Brier 0.1339, ECE 0.0237: the same numbers the
+  source project publishes.
+- **Broke: the class diagnosis.** A development smoke (seeds 10,000–10,003) labelled every
+  severity-1/2 unit break and every 100% null spike `covariate_shift`, because PSI and KS rise
+  under every fault and hit the 1,000 cap. Fixed by Amendment 1 (specific class first inside a
+  column); column results were byte-identical before and after, so H1 cannot have moved.
+- **Wrong explanation, caught by review.** I wrote that shifts became `unit_break` through
+  out-of-range values. The reviewer measured out-of-range at 0: it is LIMIT_BAL's median moving
+  one 10,000 step with a MAD of 0. Erratum added to Amendment 1. Lesson: measure the mechanism
+  before writing it down.
+- **Heaped medians.** The same effect sets τ (Amendment 2 records it as a limitation and
+  declares one exploratory arm without `median_log_ratio`; the primary method is unchanged).
+- **Small live windows.** The null model is calibrated on 1,000-row windows; a 100-row window
+  raised a false incident 100 times out of 100 in the review. Live verdicts now need at least
+  the calibration size.
+- **LightGBM threads.** On a loaded machine one fit with default threads took 714 s versus
+  0.5 s single-threaded (OpenMP spin-waiting). Tests pin `n_jobs=1`; the vendored parameters
+  are unchanged.
+- **MLflow quirks.** The default artifact root is `./mlruns` relative to the process, so the
+  experiment is created with an explicit location beside the SQLite file; MLflow's uv
+  auto-detection copied `uv.lock` into every model version and is turned off.
+- **`import conftest` across folders** resolved to the wrong folder's conftest in a full run;
+  the ops fakes moved to `tests/ops/ops_fakes.py`.
+
 ---
 
 ## Rejected approaches

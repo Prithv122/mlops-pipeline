@@ -151,3 +151,38 @@ secondary cause top-1 changes.
 AGE or LIMIT_BAL values beyond the reference range, so out-of-range crosses τ and 3 of the 8
 severity-1/2 shift windows are now labelled `unit_break`. Before the change, 8 of 8 unit
 breaks at severity 1–2 and 4 of 4 full null spikes were mislabelled; after it, 0 of each.
+
+**Erratum, 2026-10-23 (same day, before any evaluation seed).** The mechanism in the paragraph
+above is wrong. An independent review measured `out_of_range` at exactly 0 in every shift
+window it checked. The `unit_break` label comes from `median_log_ratio` on **LIMIT_BAL**: that
+column's values sit on a 10,000 grid, its no-fault window median is 140,000 in 126 of the 200
+calibration windows, so its MAD is 0 and the scale falls to the 0.01 floor. A +30,000 or
++60,000 shift moves the median one or more grid steps and scores z ≈ 6–18, above τ. Expect
+most LIMIT_BAL (odd-seed) shifts at severity 1–2 to be labelled `unit_break`; AGE shifts are
+labelled correctly. The rule itself is unchanged.
+
+### Amendment 2 — 2026-10-23, before any evaluation seed was run: run guard and one exploratory arm
+
+**What was seen (development seeds only).** Two development smokes have been run: seeds
+10,000–10,003 (48 faults, 40 controls) gave ranker − baseline column top-1 = +0.083
+(0.021 to 0.167); the reviewer's seeds 10,000–10,009 (120 faults, 100 controls) gave +0.067
+(0.017 to 0.125), τ = 7.683, false incidents 1/100. Both are below the H1 bar. They are recorded
+here so that nothing below can be read as tuning toward H1: **the primary method, H1 and H2 are
+not changed.**
+
+**Heaped medians (a limitation of the frozen method, stated before the run).** In about 160 of
+the 200 τ-fitting windows the largest no-fault evidence is `unit_break` via
+`median_log_ratio`, on columns whose medians move in steps (LIMIT_BAL 44, PAY_AMT4 33, PAY_AMT5
+30). That sets τ ≈ 7.7, which keeps severity-0 null spikes and unit breaks below the incident
+line, and the same noise can outrank a small genuine shift (seen once on development seed
+10,004: AGE severity 0 lost column top-1 to LIMIT_BAL median noise, z 3.2 against 3.1).
+
+**Exploratory arm S1, declared now.** The same grid is also scored by a variant in which
+`unit_break` evidence is `out_of_range` only (no `median_log_ratio`), with its own τ fitted the
+same way on the same calibration windows. Its column top-1, cause top-1, detection, control
+false-incident rate and paired difference against the baseline are reported in a separate,
+labelled section. **S1 never decides H1 or H2**, and it is reported whatever it shows.
+
+**Run guard.** `eval-responder --full` refuses to run unless the window size is 1,000, the data
+file's SHA-256 is the vendored cache's, the tree is clean, and the output folder has no earlier
+`records.csv`. The report prints the commit, data hash and library versions.
