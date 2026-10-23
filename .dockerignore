@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.ruff_cache
+.pytest_cache
+__pycache__
+*.py[cod]
+tests
+scripts
+mlstore
+mlruns
+mlartifacts
+*.db
+*.sqlite
+.env
+data/raw
+data/interim
