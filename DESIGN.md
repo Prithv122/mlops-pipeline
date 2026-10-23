@@ -238,3 +238,22 @@ baseline_top1, baseline_rr, baseline_incident, baseline_top_column, baseline_max
   `type`; `retrain(..., data_path="")`; `train.score_model`; `evaluate.fit_responder` and
   `window_size`/`progress` keywords; `monitor_once(..., reference_frame=None)` for the
   Evidently report; a `prepare` CLI command (writes the split for the DVC pipeline).
+- **2026-10-23 (after the independent review).**
+  - Settings defaults moved under `mlstore/` (`sqlite:///mlstore/mlflow.db`,
+    `mlstore/predlog.sqlite`, `mlstore/postmortems`) and a local `.env` is read, blanks unset.
+  - `NullModel` gains `window_size` (calibration size), `reference_sha256` and `tau_no_mlr`
+    (the exploratory arm's threshold, PREREGISTRATION.md Amendment 2). A saved null model whose
+    hash or size does not match is refitted.
+  - Live verdicts need at least `window_size` rows. `monitor_window()` returns a
+    `MonitorResult(status, rows, min_rows, ranking)` with status `analysed`, `empty` or
+    `insufficient_rows`; `monitor_once()` keeps its signature and returns `None` for the last
+    two. The webhook response gains `status` with the same values; only `analysed` responses
+    are cached per alert id.
+  - Alert ids are built from both window ends in UTC with microseconds.
+  - Top-cause lists carry `column_score` (the column's strongest evidence) beside the
+    diagnosed cause's evidence (`incident/display.py`).
+  - `rank`/`fit_null_model` take an optional `evidence_signals` mapping; the default is the
+    frozen table. `rank_no_mlr` is the exploratory arm. Records gain six `sens_*` columns after
+    the listed ones.
+  - `eval-responder --full` refuses unless window size 1,000, data SHA-256 equal to the vendored
+    cache, clean tree, and no earlier `records.csv`; provenance is printed in REPORT.md.
