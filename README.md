@@ -78,7 +78,7 @@ flowchart LR
 | Fault diagnosis | Inside a column, the most specific class above τ wins (null → unit break → recode → shift) | Highest single score wins | PSI and KS rise under every fault, so "shift" otherwise wins by default; measured on development seeds (Amendment 1) |
 | Postmortem text | A deterministic template; an optional language-model writer gets only the measured ranking and the table is appended verbatim | Let a model write the diagnosis | Prose can't be scored objectively; numbers must never come from the model |
 | Registry backend | MLflow on a local SQLite file, artifacts beside it | An MLflow tracking server | No service to run; the alias/registry API is the same one a server exposes |
-| Live verdicts | Only on windows at least as large as the calibration windows | Score any window | Calibrated on 1,000 rows, a 100-row window raised a false incident 100 times in 100 |
+| Live verdicts | Only on windows at least as large as the calibration windows | Score any window | The robust z-scores are calibrated on 1,000-row windows; a much smaller window is noisier and false-alarms far more often (seen on development seeds in review). Short windows get the status `insufficient_rows` instead of a verdict |
 
 ## 5. Results
 
@@ -137,6 +137,18 @@ zero turns one grid step into an incident.
 are synthetic with known causes; label-dependent faults (default-rate shift, concept drift) are
 out of scope because labels arrive late in credit.
 
+**What is not verified.** Read these as built and unit-tested, not as working integrations:
+
+- **Docker image:** the `Dockerfile` has never been built or run. Docker was not available on the
+  build machine.
+- **Slack:** the notifier builds Slack Block Kit payloads and is tested with a fake transport. No
+  message has been posted to a real Slack workspace.
+- **Language-model postmortem writer:** it is tested with a fake model only. No real model has
+  written a postmortem, and its prose is never scored.
+- **Retrain workflow:** `retrain.yml` is a manual GitHub workflow; its retrain command is tested
+  locally, the workflow itself has not run on GitHub.
+- **Not deployed:** the API has run locally, on this machine, only.
+
 ## 6. How to run
 
 ```bash
@@ -153,7 +165,7 @@ uv run mlops-pipeline train
 uv run mlops-pipeline serve --port 8000 --null-model mlstore/null_model.json
 ```
 
-The first `serve` fits the responder's no-fault calibration (400 windows, about a minute) and
+The first `serve` fits the responder's no-fault calibration (400 windows; about a minute on a quiet machine) and
 caches it in `mlstore/null_model.json`. Settings come from `MLOPS_*` variables or a `.env`
 file (`.env.example` lists them; blanks keep the defaults).
 
