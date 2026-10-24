@@ -139,8 +139,10 @@ out of scope because labels arrive late in credit.
 
 **What is not verified.** Read these as built and unit-tested, not as working integrations:
 
-- **Docker image:** the `Dockerfile` has never been built or run. Docker was not available on the
-  build machine.
+- **Docker image:** built and smoke-tested once (2026-10-24, Docker Desktop on Windows 11, 3.07 GB):
+  `train` inside the container registered version 1 on a mounted volume, the default command served
+  it, and `/health`, `/model` and two `/predict` calls answered, with both calls in the prediction
+  log. The incident webhook, the responder and retraining were not exercised in the container.
 - **Slack:** the notifier builds Slack Block Kit payloads and is tested with a fake transport. No
   message has been posted to a real Slack workspace.
 - **Language-model postmortem writer:** it is tested with a fake model only. No real model has

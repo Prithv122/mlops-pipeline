@@ -102,3 +102,14 @@ the target (seed 20260923, default rate 0.2213 vs 0.2212 in the full data), buil
   lists the three stages. Then the README steps in that clone with no `.env`: `train` registered
   version 1 (test AUC 0.7750), `serve` answered `/health`, `/model` and the webhook (`empty` for
   a window with no traffic). Same differences from the hosted runner as replay #1.
+
+## Docker smoke check (2026-10-24)
+
+- `docker build -t mlops-pipeline:check .` succeeded on Docker Desktop (Windows 11); image 3.07 GB.
+- `docker run --rm -v mlops-check:/app/mlstore mlops-pipeline:check mlops-pipeline train` registered
+  `credit-default` version 1 (test AUC 0.775, Brier 0.134, ECE 0.024).
+- The image's default command (`serve` on 0.0.0.0:8000, no `--null-model`) started; `/health` returned
+  ok, `/model` named version 1 under the `champion` alias, and two `/predict` calls on the first two
+  dataset rows returned probabilities and flags; the prediction log in the volume held 2 rows.
+- Not exercised in the container: the incident webhook, the responder's calibration, retraining.
+  Container, volume and image removed afterwards. README's "not verified" list updated.
